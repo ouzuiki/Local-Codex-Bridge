@@ -136,7 +136,7 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
       {
         name: "local-codex-bridge",
         title: "Local Codex Bridge",
-        version: "0.1.0",
+        version: "2.1.1",
       },
     );
 
