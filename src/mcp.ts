@@ -224,6 +224,13 @@ export class McpStdioServer {
       return;
     }
     const key = idKey(record.id);
+    if (this.#activeRequests.has(key)) {
+      void this.#sendProtocolError(record.id, {
+        code: -32600,
+        message: "Duplicate request id is already active",
+      });
+      return;
+    }
     const controller = new AbortController();
     this.#activeRequests.add(key);
     this.#requestControllers.set(key, controller);
@@ -362,6 +369,10 @@ export class McpStdioServer {
       ...(id !== undefined ? { id } : {}),
       error,
     });
+  }
+
+  async #sendProtocolError(id: RpcId, error: RpcError): Promise<void> {
+    await this.#write({ jsonrpc: JSONRPC_VERSION, id, error });
   }
 
   #abortActiveRequests(): void {

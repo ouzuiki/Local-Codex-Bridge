@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { CHECKPOINT_DIRECTORY_ENV } from "../src/checkpoint.js";
@@ -13,12 +13,14 @@ type RpcId = string | number;
 
 class TestClient {
   readonly child: ChildProcessWithoutNullStreams;
+  readonly messages: Array<Record<string, unknown>> = [];
   readonly #pending = new Map<string, (message: Record<string, unknown>) => void>();
   #buffer = "";
 
-  constructor(environment: NodeJS.ProcessEnv = process.env) {
+  constructor(environment: NodeJS.ProcessEnv = process.env, cwd?: string) {
     const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
     this.child = spawn(process.execPath, [entry], {
+      ...(cwd ? { cwd } : {}),
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -33,6 +35,7 @@ class TestClient {
         this.#buffer = this.#buffer.slice(newline + 1);
         if (!line) continue;
         const message = JSON.parse(line) as Record<string, unknown>;
+        this.messages.push(message);
         const id = message.id;
         if (typeof id === "string" || typeof id === "number") {
           this.#pending.get(`${typeof id}:${String(id)}`)?.(message);
@@ -63,6 +66,10 @@ class TestClient {
     this.child.stdin.write(value);
   }
 
+  responseCount(id: RpcId): number {
+    return this.messages.filter((message) => message.id === id && typeof message.id === typeof id).length;
+  }
+
   async close(): Promise<number | null> {
     this.child.stdin.end();
     return await new Promise<number | null>((resolve, reject) => {
@@ -76,6 +83,10 @@ class TestClient {
       });
     });
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function toolPayload(response: Record<string, unknown>): Record<string, unknown> {
@@ -189,6 +200,9 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
       (respondTool?.annotations as Record<string, unknown>).idempotentHint,
       false,
     );
+    assert.doesNotMatch(respondTool?.description as string, /permissions|elicitation|future request/i);
+    const respondProperties = (respondTool?.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>>;
+    assert.match(respondProperties.response?.description as string, /known item\/tool\/requestUserInput method/);
     const checkpointTool = tools.find((tool) => tool.name === "codex_checkpoint");
     assert.match(
       checkpointTool?.description as string,
@@ -201,6 +215,87 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
     );
   } finally {
     assert.equal(await client.close(), 0);
+  }
+});
+
+test("MCP rejects a duplicate active typed id without disturbing cancellation, cleanup, or reuse", async () => {
+  const fakeDirectory = mkdtempSync(join(tmpdir(), "local-codex-bridge-mcp-duplicate-"));
+  const fakeCodex = fileURLToPath(new URL("../../test/fake-codex.mjs", import.meta.url));
+  writeFileSync(
+    join(fakeDirectory, "app-server"),
+    `process.argv.splice(2, 0, "app-server");\nvoid import(${JSON.stringify(pathToFileURL(fakeCodex).href)});\n`,
+    "utf8",
+  );
+  const client = new TestClient({
+    ...process.env,
+    CODEX_EXE: process.execPath,
+  }, fakeDirectory);
+  try {
+    await initialize(client, 1);
+    const started = toolPayload(await client.request(2, "tools/call", {
+      name: "codex_turn",
+      arguments: {
+        text: "test: hold bounded observe",
+        cwd: fakeDirectory,
+        sandbox: "read-only",
+        approval_policy: "never",
+      },
+    }));
+    assert.equal(started.accepted, true);
+
+    client.writeRaw(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 17,
+      method: "tools/call",
+      params: {
+        name: "codex_observe",
+        arguments: {
+          thread_id: started.thread_id,
+          cursor: started.event_cursor,
+          wait_ms: 1_000,
+        },
+      },
+    })}\n`);
+    await delay(25);
+    assert.equal(client.responseCount(17), 0, "the original bounded observe must still be active");
+
+    const duplicate = client.expect(17, "duplicate numeric id rejection");
+    client.writeRaw(`${JSON.stringify({ jsonrpc: "2.0", id: 17, method: "ping", params: {} })}\n`);
+    const duplicateResponse = await duplicate;
+    assert.deepEqual(duplicateResponse.error, {
+      code: -32600,
+      message: "Duplicate request id is already active",
+    });
+
+    const distinctString = client.expect("17", "distinct string id response");
+    client.writeRaw(`${JSON.stringify({ jsonrpc: "2.0", id: "17", method: "ping", params: {} })}\n`);
+    const stringResponse = await distinctString;
+    assert.deepEqual(stringResponse.result, {});
+
+    client.writeRaw(`${JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/cancelled",
+      params: { requestId: 17, reason: "deterministic duplicate lifecycle test" },
+    })}\n`);
+    await delay(1_100);
+    assert.equal(
+      client.responseCount(17),
+      1,
+      "the cancelled first request response must remain suppressed",
+    );
+    assert.equal(client.responseCount("17"), 1, "numeric and string ids must remain distinct");
+
+    const reused = await client.request(17, "ping");
+    assert.deepEqual(reused.result, {});
+    await delay(25);
+    assert.equal(
+      client.responseCount(17),
+      2,
+      "finally cleanup must allow safe reuse of the same typed id",
+    );
+  } finally {
+    assert.equal(await client.close(), 0);
+    rmSync(fakeDirectory, { recursive: true, force: true });
   }
 });
 

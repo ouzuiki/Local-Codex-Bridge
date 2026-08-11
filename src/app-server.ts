@@ -10,6 +10,13 @@ import {
 
 const MAX_JSONL_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const MUTATING_ACKNOWLEDGEMENT_METHODS = new Set([
+  "thread/start",
+  "thread/resume",
+  "turn/start",
+  "turn/steer",
+  "turn/interrupt",
+]);
 const THREADLESS_REQUEST_ERROR = {
   code: -32601,
   message: "Unsupported app-server request without thread context",
@@ -50,6 +57,15 @@ function messageFromUnknown(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function requestTimeoutError(method: string): Error {
+  if (MUTATING_ACKNOWLEDGEMENT_METHODS.has(method)) {
+    return new Error(
+      `Codex app-server acknowledgement timed out after request was sent: ${method}. Operation outcome is UNKNOWN: Codex may already have accepted it. Re-observe or read before retrying; the Bridge will not automatically retry, cancel, or reconcile the operation.`,
+    );
+  }
+  return new Error(`Codex app-server request timed out: ${method}`);
 }
 
 export function resolveCodexExecutable(
@@ -335,7 +351,7 @@ export class AppServerManager {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pendingCalls.delete(rpcKey(id));
-        reject(new Error(`Codex app-server request timed out: ${method}`));
+        reject(requestTimeoutError(method));
       }, timeoutMs);
       this.#pendingCalls.set(rpcKey(id), { method, resolve, reject, timer });
       void this.#write({ method, id, params }).catch((error: unknown) => {
