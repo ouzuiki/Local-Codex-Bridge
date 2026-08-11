@@ -1,168 +1,112 @@
 # Local Codex Bridge
 
-Local Codex Bridge is a small, Windows-oriented MCP stdio bridge for native Codex sessions. It exposes seven explicit controls for finding threads, starting or continuing a turn, observing progress, answering real app-server requests, steering or interrupting an active turn, and preserving an optional supervision checkpoint.
+*A thin MCP control bridge from ChatGPT to native Codex sessions.*
 
-The Bridge is currently Windows only. In particular, working-directory validation accepts absolute Windows drive-letter paths, and the optional Tray integration uses Windows PowerShell, Windows Forms, WMI/CIM, and Windows process identity.
+Local Codex Bridge 是一个面向 Windows 的轻量 MCP stdio 桥接器：它让 ChatGPT（或其他 MCP 客户端）能够调用本机原生 Codex 会话，同时把真正的线程、回合、历史记录和执行能力继续交给官方 Codex app-server 管理。
 
-## How it runs
+它解决的是一个很具体的问题：ChatGPT 适合对话、拆解目标和持续监督，Codex 则能在本机工作区里使用真实的文件、命令和开发工具。Bridge 在两者之间提供 7 个边界清楚的控制工具，不再额外发明一套任务系统。
 
-The direct stdio path is the primary runtime:
+## 它是怎样工作的
+
+真实的数据链路是：
 
 ```text
-MCP client
-  -> Local Codex Bridge (newline-delimited JSON-RPC over stdio)
-  -> official Codex app-server (stdio)
-  -> native Codex sessions
+ChatGPT / 其他 MCP 客户端
+        │
+        │ MCP JSON-RPC（stdio；远程场景可由 Secure MCP Tunnel 接入）
+        ▼
+Local Codex Bridge
+        │
+        │ Codex app-server JSONL（stdio）
+        ▼
+官方 Codex：codex app-server --listen stdio://
+        │
+        └── 本机原生线程、回合、历史记录与执行权限
 ```
 
-The Bridge lazily starts one official Codex app-server child. It does not add Bridge job IDs, a second task lifecycle, or automatic child restart. Native Codex owns persistent threads, turns, history, and final messages. Bridge memory holds only bounded live supervision state, sanitized events, pending app-server requests, and terminal snapshots. Optional checkpoints are separate bounded supervisor metadata, not Codex history.
+换句话说，Local Codex Bridge 是提供给 ChatGPT 的 MCP Server；Codex app-server 是 Bridge 在内部驱动原生 Codex 的官方协议进程。它们不是同一个接口，也不是两套并行的任务系统。
 
-Secure MCP Tunnel can be placed in front of the stdio command when remote MCP connectivity is wanted. The Windows Tray is an optional launcher/status layer for that Tunnel setup. Neither is required for a direct stdio integration.
+当工具首次需要原生 Codex 时，Bridge 会懒启动一个官方 app-server 子进程。Bridge 自己不创建 job ID、不维护队列、不保存第二份对话历史，也不会自动重试或自动重启意外退出的 app-server。
 
-## Seven MCP tools
+## 7 个 MCP 工具
 
-All seven tools publish an object input schema and explicit MCP read-only, destructive, idempotent, and open-world annotations. Tool names and protocol behavior are intentionally stable.
+| 工具 | 用途 | 重要边界 |
+| --- | --- | --- |
+| `codex_threads` | 列出、搜索或读取原生 Codex 持久线程 | `cwd` 和搜索词只是筛选条件，不是权限边界；不会重建已经丢失的 Bridge 实时事件 |
+| `codex_turn` | 新建或恢复线程，并启动一个回合 | 新线程必须提供绝对 Windows 盘符路径；返回“已接受”不等于任务完成 |
+| `codex_observe` | 读取有界的实时事件、待处理请求、终态和游标 | `wait_ms` 最长 10 秒，只做一次事件驱动等待；安静不代表卡死 |
+| `codex_steer` | 向同一个活动回合追加纠正或新意图 | 必须匹配准确的 `thread_id` 和 `expected_turn_id`；不会新建回合 |
+| `codex_respond` | 回答真实的审批、用户输入、权限或 elicitation 请求 | 必须使用原始 request ID 及准确的线程、方法和回合范围；不能虚构请求 |
+| `codex_interrupt` | 中断准确的活动线程与回合 | 只发送原生 `turn/interrupt`；不会停止或重启 Bridge / app-server |
+| `codex_checkpoint` | 为长任务保存可选、精简且有界的监督锚点 | 不是转录、日志、任务 ID 或 Codex 历史；原始目标、约束和验收条件初始化后不可变 |
 
-### `codex_threads`
+所有工具都公开对象输入 schema，以及 MCP 的只读、破坏性、幂等和 open-world 提示。完整字段和限制以 [`src/tools.ts`](src/tools.ts) 为准。
 
-Lists persistent native Codex threads or reads one exact thread.
+## 快速开始
 
-- With `thread_id`, it calls `thread/read`; `include_turns` may request persisted turns.
-- Without `thread_id`, it calls `thread/list` with optional absolute Windows `cwd`, title `search_term`, cursor, and `limit` from 1 to 100.
-- `cwd` and search values are filters, not access-control boundaries.
-- It does not reconstruct live Bridge events or prove that a stored thread is active.
-
-### `codex_turn`
-
-Starts a new native thread or resumes an existing thread, then starts one turn with the supplied text.
-
-- A new thread requires an absolute Windows drive-letter `cwd`.
-- A resumed thread may receive optional `cwd`, `model`, `effort`, `sandbox`, and `approval_policy` overrides.
-- Supported sandbox values are `read-only`, `workspace-write`, and `danger-full-access`; approval policy values are `untrusted`, `on-request`, and `never`.
-- The call returns when `turn/start` is accepted, not when work completes. Observe the turn separately.
-- `thread_id` is native Codex context, not a permanent task or job ID.
-
-### `codex_observe`
-
-Reads sanitized live events, pending app-server requests, terminal output, cursor state, and current turn state for one thread.
-
-- `cursor` is non-consuming; `limit` is 1 to 100.
-- `wait_ms` is 0 to 10,000 and performs at most one bounded event-driven wait when the live turn is active and nothing useful is already ready.
-- If Bridge memory for the thread is gone, it falls back to persisted `thread/read` history and explicitly marks live state as unreconstructable.
-- A quiet interval is not proof of a stall. When active supervision was requested, inspect every fresh snapshot and continue bounded observes until terminal unless the user pauses or stops.
-
-### `codex_steer`
-
-Appends text to the same active turn through `turn/steer`. It requires the exact `thread_id` and `expected_turn_id`; it never creates a new turn. Use it only for a semantic correction or redirect, not merely because a turn is taking time.
-
-### `codex_respond`
-
-Answers one real, currently pending app-server request using its original string or integer `request_id`, exact thread/method scope, and `turn_id` when present. Exactly one native response form is allowed: an approval `decision`, an `execpolicy_amendment`, question `answers`, or a generic result `response` for supported methods.
-
-Never invent a request ID, widen its scope, or use this tool as a general message or turn-completion mechanism.
-
-### `codex_interrupt`
-
-Sends native `turn/interrupt` for one exact active `thread_id` and `turn_id`. It does not restart or stop the Bridge or app-server process.
-
-### `codex_checkpoint`
-
-Reads or updates optional bounded supervisor cognition metadata keyed to one native `thread_id`.
-
-- Initialize it only when a long or complex supervision task has enough continuity risk to justify an external anchor; initialization may happen early.
-- The original goal, constraints, and acceptance criteria are immutable after initialization.
-- Update only after a material change in understanding, constraints, steering choice, user-authorized amendment, or acceptance judgment.
-- Read an existing checkpoint once before final acceptance.
-- Do not checkpoint ordinary one-shot work, every observation, timers, token or poll counts, silence, prompts, transcripts, raw events, command output, or final answers.
-- A checkpoint is not a task ID, lifecycle record, transcript store, or requirement to keep future work on the same native thread.
-
-## Supervision semantics
-
-`turn/start` acceptance is not completion. For an actively supervised turn, use bounded event-driven observes until terminal unless the user explicitly pauses or stops. After each wake or deadline, inspect the new state before waiting again, steering, responding, or interrupting.
-
-Choose thread continuity from task continuity and context value. A fresh thread is a fallback when scope, context quality, or permissions make it preferable, not a mandatory audit/write boundary. Behavioral instructions and native sandbox capability are separate: the prompt constrains intended behavior, while the requested `sandbox` and `approval_policy` configure Codex capability.
-
-Respond only to a real pending request. Steer only when new evidence or changed intent changes the work. Interrupt only for an explicit stop. None of these operations creates a hidden Bridge job lifecycle.
-
-## Trust and security model
-
-Local Codex Bridge does not create a new operating-system sandbox. Actual command, file, network, and process access is governed by the official Codex executable/app-server configuration and permissions, plus the `sandbox` and `approval_policy` requested for a turn.
-
-`codex_threads` list/read can expose native persistent threads visible to the same local Codex app-server and current OS user. Its `cwd` and search inputs narrow results but are not a security boundary.
-
-Event and pending-request data is bounded and sanitized for obvious secrets before transport. That reduces accidental exposure; it does not make the Bridge suitable as a hostile multi-tenant gateway or a cross-user isolation layer. Keep checkpoints concise and non-sensitive.
-
-No general shell tool is directly exposed. However, text sent through `codex_turn` or `codex_steer` can cause Codex to use its configured command and file capabilities, subject to Codex policy, sandbox, approvals, and the instructions supplied for that turn.
-
-## Non-goals
-
-The Bridge is not:
-
-- a task/job manager, queue, daemon, or permanent task-ID service;
-- a second transcript, history, or live-event database;
-- a background monitor, poller, stall detector, or telemetry system;
-- an auto-retry, auto-restart, or process-management service;
-- a cross-user or hostile multi-tenant isolation layer;
-- a bundled Codex runtime, Tunnel profile manager, HTTP MCP server, or general shell endpoint.
-
-## Requirements
+### 环境要求
 
 - Windows
-- Node.js 24 or newer
-- An official Codex executable available as `codex` on `PATH`, or supplied through the `CODEX_EXE` environment variable
+- Node.js 24 或更高版本
+- 官方 Codex 可执行文件：可以直接通过 `codex` 命令找到，也可以用 `CODEX_EXE` 指定
 
-The project does not install or depend on `@openai/codex`.
+本项目不捆绑、也不依赖 `@openai/codex` npm 包。
 
-## Install, build, and test
+### 让 AI Agent 协助安装
+
+如果你把仓库交给 Codex、Claude Code、Kimi 或其他本地 AI Agent，请让它先阅读本页和 [`AGENTS.md`](AGENTS.md)，检查目标机器上真实的 Node.js、Codex、路径及可选 Tunnel 环境，再按实际情况适配；不要照抄示例路径、profile、端口或配置。
+
+### 安装、构建与测试
 
 ```powershell
-git clone <repository-url> local-codex-bridge
-cd local-codex-bridge
+git clone https://github.com/zoeynine/Local-Codex-Bridge.git
+cd Local-Codex-Bridge
 npm ci
 npm run typecheck
 npm run build
 npm test
 ```
 
-For a direct terminal run after building:
+构建后可在终端直接启动：
 
 ```powershell
-$env:CODEX_EXE = 'C:\path\to\codex.exe' # optional when codex is already on PATH
+$env:CODEX_EXE = 'C:\path\to\codex.exe' # codex 已在 PATH 时可省略
 npm start
 ```
 
-The child command is always:
+接入 MCP 客户端时，请把 stdio 命令直接配置为：
 
 ```text
-codex app-server --listen stdio://
+command: node
+args:    C:\absolute\path\to\Local-Codex-Bridge\dist\src\index.js
+env:     CODEX_EXE=C:\path\to\codex.exe   # 可选
 ```
 
-For an MCP client, configure the stdio command directly as `node dist/src/index.js`. Do not put `npm start` behind an MCP Tunnel or another strict JSON-RPC stdio client because npm lifecycle output can pollute stdout.
+不同客户端的配置文件格式并不相同，但最终应直接运行 `node dist/src/index.js`。不要在 Secure MCP Tunnel 或其他严格的 JSON-RPC stdio 客户端后面使用 `npm start`，因为 npm 生命周期输出可能污染 stdout 协议流。
 
-`npm run smoke:live` is intentionally separate from unit tests. It launches real Codex read-only smoke tasks and creates persistent test threads, so run it only when that side effect is wanted.
+## 如何监督一个回合
 
-## Persistence and restart boundaries
+`codex_turn` 只确认 `turn/start` 已被接受。需要持续监督时，应使用有界的 `codex_observe` 等到终态，并在每次返回后检查新事件、待处理请求和当前状态，再决定是否继续观察、`codex_steer`、`codex_respond` 或 `codex_interrupt`。
 
-- Native Codex threads, turns, history, and final output remain in the official app-server persistence layer.
-- Bridge event rings and pending request maps are process memory and cannot be reconstructed after Bridge loss.
-- Checkpoints are bounded per-thread JSON files under the current user's local application-data directory, by default `%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json`.
-- `LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR` may select another absolute checkpoint directory.
-- On clean shutdown, the Bridge closes its exact app-server child and escalates only against that child if it does not exit promptly.
-- An unexpectedly dead app-server is latched as failed and is not automatically restarted inside the same Bridge process.
+- 长时间没有新命令或输出，不足以证明 Codex 卡住了。
+- 只有新证据或用户意图发生变化时才应 steer。
+- 只有确实存在的 pending request 才能 respond。
+- 只有明确需要停止当前回合时才应 interrupt。
+- 是否复用线程取决于任务连续性和上下文价值；`thread_id` 不是永久任务编号。
 
-## Optional Secure MCP Tunnel
+## 可选：Secure MCP Tunnel
 
-Build first, then configure the Tunnel's MCP command as:
+远程 MCP 连接可以在 Bridge 前面放置 Secure MCP Tunnel。先完成构建，再把 Tunnel 的 MCP command 指向：
 
 ```text
 node <repository>\dist\src\index.js
 ```
 
-Tunnel installation, authentication, profiles, ports, readiness endpoints, and process lifecycle remain external configuration. This repository does not create or modify a Tunnel profile.
+Tunnel 的安装、认证、profile、端口、ready endpoint 和进程生命周期都属于外部配置。本仓库不会创建或修改 Tunnel profile，也没有内置生产端口或凭据。
 
-## Optional Windows Tray
+## 可选：Windows Tray
 
-The Tray starts and observes a separately installed Tunnel client. It has no production profile, port, readiness URL, or executable baked in. Supply all three required values as parameters:
+`windows/` 中的 Tray 是单独安装的 Tunnel client 的轻量启动与状态层，不是 Bridge 的必要组成部分。它要求调用者提供 readiness URL、profile 名称和 Tunnel 可执行文件：
 
 ```powershell
 .\windows\LocalCodexBridgeTray.Debug.cmd `
@@ -171,7 +115,7 @@ The Tray starts and observes a separately installed Tunnel client. It has no pro
   -TunnelExecutable 'C:\path\to\tunnel-client.exe'
 ```
 
-Or set the public environment variables before using the hidden CMD or VBS launcher:
+日常隐藏启动也可以先设置环境变量，再使用 VBS launcher：
 
 ```powershell
 $env:LOCAL_CODEX_BRIDGE_READY_URL = 'http://127.0.0.1:<port>/readyz'
@@ -180,8 +124,60 @@ $env:LOCAL_CODEX_BRIDGE_TUNNEL_EXE = 'C:\path\to\tunnel-client.exe'
 wscript.exe .\windows\LocalCodexBridgeTray.vbs
 ```
 
-`LOCAL_CODEX_BRIDGE_PROJECTION_PATH` can override the Tray's projection file. The Tray passes that path to its Tunnel child as `LOCAL_CODEX_BRIDGE_UX_PROJECTION`; without this opt-in environment value, Bridge runtime projection is disabled. The Tray checks only the configured readiness URL, does not auto-restart, and may stop only the exact Tunnel process launched by that live Tray instance after executable, command line, profile, start time, PID, and PID-file identity are revalidated.
+Tray 不会自动重启 Tunnel。它只检查配置的 readiness URL；停止时，也只会在可执行路径、命令行、profile、启动时间、PID 和 PID 文件重新核验一致后，停止由当前 Tray 实例启动的那个 Tunnel 进程。
 
-## License
+`LOCAL_CODEX_BRIDGE_PROJECTION_PATH` 可以覆盖 Tray 使用的投影文件位置。Tray 会把该位置作为 `LOCAL_CODEX_BRIDGE_UX_PROJECTION` 传给 Tunnel 子进程；未显式启用时，Bridge 不写 UX 投影。
 
-Licensed under the MIT License. See `LICENSE`.
+## 安全与信任边界
+
+Local Codex Bridge 不会创建新的操作系统沙箱。真正的文件、命令、网络和进程权限，来自官方 Codex 的配置，以及每个回合请求的 `sandbox` 与 `approval_policy`。`danger-full-access` 会放宽沙箱对文件、命令和进程访问的限制；`approval_policy=never` 不会扩大操作系统沙箱，但会取消交互式审批这道确认环节。两者的风险来源不同，都应只在已经理解并接受相应边界时使用。
+
+还需要明确以下边界：
+
+- `codex_turn` / `codex_steer` 传入的文本可能促使 Codex 使用其已配置的命令和文件能力；“没有直接暴露 shell 工具”不等于“不会执行本机操作”。
+- `codex_threads` 能看到同一操作系统用户和同一 Codex app-server 可见的持久线程；`cwd` 与搜索条件不能隔离访问。
+- Bridge 会把自身进程环境继承给 app-server 子进程。启动环境应被视为可信边界，不要放入无关且不必要的秘密。
+- 实时事件和 pending request 会被限量，并对明显的敏感内容做清理；这只能减少意外暴露，不能把 Bridge 变成敌对多租户网关或跨用户隔离层。
+- 远程使用时，应由经过认证、配置正确的 Tunnel 提供连接边界；不要把本地 stdio 控制面直接暴露给不可信来源。
+- checkpoint 应保持简短且不含敏感信息；不要保存 prompt、逐字记录、原始事件、命令输出或最终回答。
+
+## 持久化与当前限制
+
+- 原生线程、回合、历史和最终输出由官方 Codex 持久化。
+- Bridge 的事件 ring、活动回合状态和 pending request 只在内存中存在。Bridge 重启后，`codex_observe` 可以回退读取持久历史，但会明确标记实时状态无法重建。
+- checkpoint 是独立的有界 JSON 文件，默认位于 `%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json`；可用 `LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR` 指定其他绝对目录。
+- app-server 意外退出后会被锁定为失败状态，不会在同一个 Bridge 进程中自动重启。
+- 当前公开版本只声明支持 Windows：`cwd` 接受绝对盘符路径，不接受 UNC 或 Windows device path；Tray 还依赖 Windows PowerShell、Windows Forms 和 WMI/CIM。
+- 核心代码虽然是 TypeScript，但本仓库尚未声明或验证 macOS / Linux 支持。
+- Bridge 不是任务队列、后台监控器、HTTP MCP Server、通用 shell endpoint、Codex 运行时安装器或 Tunnel profile 管理器。
+
+## 开发与测试
+
+常用检查：
+
+```powershell
+npm run typecheck
+npm run build
+npm test
+```
+
+`npm test` 会构建项目，并运行 runtime、app-server、MCP、checkpoint、UX projection 和 Windows Tray 测试。
+
+`npm run smoke:live` 与单元测试刻意分开：它会调用真实 Codex、启动只读 smoke 任务，并留下持久测试线程。只有在明确接受这些副作用时才运行。
+
+主要实现位置：
+
+- `src/mcp.ts`：MCP stdio / JSON-RPC 边界
+- `src/app-server.ts`：官方 Codex app-server 子进程与协议适配
+- `src/tools.ts`：7 个工具的 schema、校验和语义
+- `src/runtime.ts`：有界实时状态、事件与 pending request
+- `src/checkpoint.ts`：可选监督 checkpoint
+- `src/ux-projection.ts` 与 `windows/`：可选 Tray 投影和 Windows 交互
+
+## 许可证
+
+本项目采用 MIT License，详见 [`LICENSE`](LICENSE)。
+
+## 协作贡献者与致谢
+
+协作贡献者：**小年（ChatGPT）**、**Codex**。谢谢两位一起把想法、边界和实现认真地走到了可以公开分享的版本，也谢谢这段彼此配合、反复打磨的过程。`(*╹▽╹*)`
