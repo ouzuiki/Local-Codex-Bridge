@@ -1,0 +1,540 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { Writable } from "node:stream";
+
+import {
+  RuntimeStore,
+  redactText,
+  sanitizeForTransport,
+  type RpcId,
+} from "./runtime.js";
+
+const MAX_JSONL_BYTES = 10 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const THREADLESS_REQUEST_ERROR = {
+  code: -32601,
+  message: "Unsupported app-server request without thread context",
+} as const;
+
+interface PendingCall {
+  method: string;
+  resolve: (value: unknown) => void;
+  reject: (reason: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
+export interface AppServerLaunchOptions {
+  executable?: string;
+  prefixArgs?: readonly string[];
+  requestTimeoutMs?: number;
+}
+
+function rpcKey(id: RpcId): string {
+  return `${typeof id}:${String(id)}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function messageFromUnknown(value: unknown): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(sanitizeForTransport(value));
+  } catch {
+    return String(value);
+  }
+}
+
+export function resolveCodexExecutable(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit = environment.CODEX_EXE?.trim();
+  if (explicit) {
+    if (/[\0\r\n]/.test(explicit)) {
+      throw new Error("CODEX_EXE contains an invalid control character");
+    }
+    return explicit;
+  }
+  return "codex";
+}
+
+async function waitForExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return true;
+  }
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (value: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(value);
+    };
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+  });
+}
+
+export function writeWithBackpressure(
+  stream: Writable,
+  chunk: string,
+): Promise<void> {
+  if (!stream.writable || stream.writableEnded || stream.destroyed) {
+    return Promise.reject(new Error("Codex app-server stdin is not writable"));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let writeReturned = false;
+    let callbackDone = false;
+    let drainDone = false;
+
+    const cleanup = (): void => {
+      stream.off("drain", onDrain);
+      stream.off("error", onError);
+      stream.off("close", onClose);
+    };
+    const fail = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const maybeResolve = (): void => {
+      if (!settled && writeReturned && callbackDone && drainDone) {
+        settled = true;
+        cleanup();
+        resolve();
+      }
+    };
+    const onDrain = (): void => {
+      drainDone = true;
+      maybeResolve();
+    };
+    const onError = (error: Error): void => fail(error);
+    const onClose = (): void =>
+      fail(new Error("Codex app-server stdin closed during write"));
+    const onWrite = (error?: Error | null): void => {
+      if (error) {
+        fail(error);
+        return;
+      }
+      callbackDone = true;
+      maybeResolve();
+    };
+
+    stream.once("drain", onDrain);
+    stream.once("error", onError);
+    stream.once("close", onClose);
+    try {
+      const accepted = stream.write(chunk, "utf8", onWrite);
+      if (settled) {
+        return;
+      }
+      if (accepted) {
+        drainDone = true;
+        stream.off("drain", onDrain);
+      }
+      writeReturned = true;
+      maybeResolve();
+    } catch (error) {
+      fail(
+        error instanceof Error
+          ? error
+          : new Error(messageFromUnknown(error)),
+      );
+    }
+  });
+}
+
+export function createSerializedWriter(
+  write: (chunk: string) => Promise<void>,
+): (chunk: string) => Promise<void> {
+  let tail = Promise.resolve();
+  return async (chunk: string): Promise<void> => {
+    const current = tail.then(() => write(chunk));
+    tail = current.catch(() => undefined);
+    await current;
+  };
+}
+
+export class AppServerManager {
+  readonly runtime: RuntimeStore;
+
+  readonly #executable: string;
+  readonly #prefixArgs: readonly string[];
+  readonly #requestTimeoutMs: number;
+  readonly #pendingCalls = new Map<string, PendingCall>();
+  readonly #writeLine: (chunk: string) => Promise<void>;
+
+  #child: ChildProcessWithoutNullStreams | null = null;
+  #startPromise: Promise<void> | null = null;
+  #closePromise: Promise<void> | null = null;
+  #fatal: Error | null = null;
+  #closing = false;
+  #initialized = false;
+  #nextRequestId = 1;
+  #stdoutBuffer = Buffer.alloc(0);
+
+  constructor(
+    runtime = new RuntimeStore(),
+    options: AppServerLaunchOptions = {},
+  ) {
+    this.runtime = runtime;
+    this.#executable = options.executable ?? resolveCodexExecutable();
+    this.#prefixArgs = options.prefixArgs ?? [];
+    this.#requestTimeoutMs =
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#writeLine = createSerializedWriter(async (chunk) => {
+      const child = this.#child;
+      if (
+        this.#closing ||
+        this.#fatal ||
+        !child ||
+        child.exitCode !== null ||
+        child.signalCode !== null
+      ) {
+        throw new Error("Codex app-server stdin is not writable");
+      }
+      await writeWithBackpressure(child.stdin, chunk);
+    });
+  }
+
+  async request(method: string, params: unknown): Promise<unknown> {
+    await this.ensureReady();
+    return await this.#request(method, params, this.#requestTimeoutMs);
+  }
+
+  async respond(id: RpcId, result: unknown): Promise<void> {
+    await this.ensureReady();
+    await this.#write({ id, result });
+  }
+
+  async ensureReady(): Promise<void> {
+    if (this.#closing) {
+      throw new Error("Codex app-server manager is closing");
+    }
+    if (this.#fatal) {
+      throw new Error(
+        `Codex app-server is unavailable and will not be auto-restarted: ${this.#fatal.message}`,
+      );
+    }
+    if (this.#initialized && this.#child) {
+      return;
+    }
+    if (!this.#startPromise) {
+      this.#startPromise = this.#start();
+    }
+    await this.#startPromise;
+  }
+
+  async close(): Promise<void> {
+    if (this.#closePromise) {
+      return await this.#closePromise;
+    }
+    this.#closePromise = this.#close();
+    return await this.#closePromise;
+  }
+
+  async #start(): Promise<void> {
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(
+        this.#executable,
+        [...this.#prefixArgs, "app-server", "--listen", "stdio://"],
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false,
+          windowsHide: true,
+          env: process.env,
+        },
+      );
+    } catch (error) {
+      this.#fatal = new Error(
+        `Failed to spawn ${this.#executable}: ${redactText(messageFromUnknown(error))}`,
+      );
+      throw this.#fatal;
+    }
+
+    this.#child = child;
+    child.stdin.on("error", (error) => this.#onStdinError(child, error));
+    child.stdin.once("close", () => this.#onStdinClose(child));
+    child.stdout.on("data", (chunk: Buffer) => this.#onStdout(chunk));
+    child.stderr.on("data", () => {
+      // Drain without forwarding potentially sensitive child diagnostics.
+    });
+    child.once("exit", (code, signal) => this.#onExit(child, code, signal));
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onSpawn = (): void => {
+          child.off("error", onError);
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          child.off("spawn", onSpawn);
+          reject(error);
+        };
+        child.once("spawn", onSpawn);
+        child.once("error", onError);
+      });
+      child.on("error", (error) => this.#onChildError(child, error));
+
+      await this.#request(
+        "initialize",
+        {
+          clientInfo: {
+            name: "local-codex-bridge",
+            title: "Local Codex Bridge",
+            version: "0.1.0",
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+            mcpServerOpenaiFormElicitation: false,
+            optOutNotificationMethods: [],
+          },
+        },
+        30_000,
+      );
+      await this.#write({ method: "initialized", params: {} });
+      this.#initialized = true;
+    } catch (error) {
+      const failure =
+        this.#fatal ??
+        new Error(`Codex app-server initialization failed: ${redactText(messageFromUnknown(error))}`);
+      this.#fatal = failure;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.stdin.end();
+        if (!(await waitForExit(child, 500))) {
+          child.kill();
+        }
+      }
+      throw failure;
+    }
+  }
+
+  #request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    const id = this.#nextRequestId;
+    this.#nextRequestId += 1;
+    return new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pendingCalls.delete(rpcKey(id));
+        reject(new Error(`Codex app-server request timed out: ${method}`));
+      }, timeoutMs);
+      this.#pendingCalls.set(rpcKey(id), { method, resolve, reject, timer });
+      void this.#write({ method, id, params }).catch((error: unknown) => {
+        const pending = this.#pendingCalls.get(rpcKey(id));
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timer);
+        this.#pendingCalls.delete(rpcKey(id));
+        pending.reject(
+          new Error(`Failed to write app-server request ${method}: ${messageFromUnknown(error)}`),
+        );
+      });
+    });
+  }
+
+  async #write(message: unknown): Promise<void> {
+    const encoded = `${JSON.stringify(message)}\n`;
+    await this.#writeLine(encoded);
+  }
+
+  #onStdout(chunk: Buffer): void {
+    if (this.#fatal || this.#closing) {
+      return;
+    }
+    this.#stdoutBuffer = Buffer.concat([this.#stdoutBuffer, chunk]);
+    while (true) {
+      const newline = this.#stdoutBuffer.indexOf(0x0a);
+      if (newline < 0) {
+        if (this.#stdoutBuffer.length > MAX_JSONL_BYTES) {
+          this.#protocolFailure("app-server JSONL line exceeded 10 MiB");
+        }
+        return;
+      }
+      if (newline > MAX_JSONL_BYTES) {
+        this.#protocolFailure("app-server JSONL line exceeded 10 MiB");
+        return;
+      }
+      let line = this.#stdoutBuffer.subarray(0, newline);
+      this.#stdoutBuffer = this.#stdoutBuffer.subarray(newline + 1);
+      if (line.at(-1) === 0x0d) {
+        line = line.subarray(0, -1);
+      }
+      if (line.length === 0) {
+        continue;
+      }
+      try {
+        this.#dispatch(JSON.parse(line.toString("utf8")) as unknown);
+      } catch (error) {
+        this.#protocolFailure(`invalid app-server JSONL: ${messageFromUnknown(error)}`);
+        return;
+      }
+    }
+  }
+
+  #dispatch(message: unknown): void {
+    const record = asRecord(message);
+    if (!record) {
+      throw new Error("app-server emitted a non-object message");
+    }
+    const method = typeof record.method === "string" ? record.method : undefined;
+    const id =
+      typeof record.id === "string" || typeof record.id === "number"
+        ? record.id
+        : undefined;
+
+    if (method) {
+      if (id !== undefined) {
+        const recorded = this.runtime.recordServerRequest(id, method, record.params);
+        if (!recorded) {
+          void this.#write({
+            id,
+            error: THREADLESS_REQUEST_ERROR,
+          }).catch((error: unknown) => {
+            this.#protocolFailure(
+              `failed to reject unsupported app-server request: ${messageFromUnknown(error)}`,
+            );
+          });
+        }
+      } else {
+        this.runtime.recordNotification(method, record.params);
+      }
+      return;
+    }
+    if (id === undefined) {
+      throw new Error("app-server response has no request id");
+    }
+    const pending = this.#pendingCalls.get(rpcKey(id));
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.#pendingCalls.delete(rpcKey(id));
+    if ("error" in record && record.error !== undefined && record.error !== null) {
+      const errorRecord = asRecord(record.error);
+      const detail =
+        typeof errorRecord?.message === "string"
+          ? errorRecord.message
+          : messageFromUnknown(record.error);
+      pending.reject(
+        new Error(`Codex app-server ${pending.method} failed: ${redactText(detail)}`),
+      );
+    } else {
+      pending.resolve(record.result);
+    }
+  }
+
+  #protocolFailure(message: string): void {
+    if (this.#fatal) {
+      return;
+    }
+    this.#fatal = new Error(redactText(message));
+    this.runtime.markAppServerExited(this.#fatal.message);
+    this.#rejectAll(this.#fatal);
+    const child = this.#child;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.stdin.end();
+      const timer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+        }
+      }, 500);
+      timer.unref();
+    }
+  }
+
+  #onChildError(child: ChildProcessWithoutNullStreams, error: Error): void {
+    if (child !== this.#child || this.#closing) {
+      return;
+    }
+    this.#fatal = new Error(`Codex app-server process error: ${redactText(error.message)}`);
+    this.runtime.markAppServerExited(this.#fatal.message);
+    this.#rejectAll(this.#fatal);
+  }
+
+  #onStdinError(child: ChildProcessWithoutNullStreams, error: Error): void {
+    if (child !== this.#child || this.#closing || this.#fatal) {
+      return;
+    }
+    this.#protocolFailure(
+      `Codex app-server stdin failed: ${messageFromUnknown(error)}`,
+    );
+  }
+
+  #onStdinClose(child: ChildProcessWithoutNullStreams): void {
+    if (
+      child !== this.#child ||
+      this.#closing ||
+      this.#fatal ||
+      child.exitCode !== null ||
+      child.signalCode !== null
+    ) {
+      return;
+    }
+    this.#protocolFailure("Codex app-server stdin closed unexpectedly");
+  }
+
+  #onExit(
+    child: ChildProcessWithoutNullStreams,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (child !== this.#child) {
+      return;
+    }
+    this.#initialized = false;
+    if (this.#closing) {
+      return;
+    }
+    const failure = new Error(
+      `Codex app-server exited unexpectedly (code=${String(code)}, signal=${String(signal)})`,
+    );
+    this.#fatal = failure;
+    this.runtime.markAppServerExited(failure.message);
+    this.#rejectAll(failure);
+  }
+
+  #rejectAll(error: Error): void {
+    for (const pending of this.#pendingCalls.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.#pendingCalls.clear();
+  }
+
+  async #close(): Promise<void> {
+    this.#closing = true;
+    const child = this.#child;
+    if (!child) {
+      return;
+    }
+    this.#rejectAll(new Error("Codex app-server manager is shutting down"));
+    if (child.exitCode === null && child.signalCode === null) {
+      child.stdin.end();
+      if (!(await waitForExit(child, 1_500))) {
+        child.kill();
+        await waitForExit(child, 1_000);
+      }
+    }
+    this.#child = null;
+  }
+}

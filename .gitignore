@@ -1,0 +1,10 @@
+node_modules/
+dist/
+_codex_tmp/
+_render_tmp/
+_render_cache/
+_render_out/
+_render_home/
+npm-debug.log*
+.env
+.env.*
