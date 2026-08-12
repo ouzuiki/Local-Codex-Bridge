@@ -38,6 +38,14 @@ const sandboxSchema = {
   description: "Codex app-server sandbox mode override.",
 };
 
+const NATIVE_SANDBOX_POLICY_TYPE_BY_MODE = {
+  "read-only": "readOnly",
+  "workspace-write": "workspaceWrite",
+  "danger-full-access": "dangerFullAccess",
+} as const;
+
+type PublicSandboxMode = keyof typeof NATIVE_SANDBOX_POLICY_TYPE_BY_MODE;
+
 const SUPPORTED_RESPOND_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -58,6 +66,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         thread_id: {
           type: "string",
           minLength: 1,
+          maxLength: 200,
           description: "When supplied, read this exact Codex thread instead of listing threads.",
         },
         include_turns: {
@@ -67,6 +76,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
         cwd: {
           type: "string",
+          maxLength: 1000,
           description: "Optional exact absolute Windows drive-letter cwd filter for thread/list.",
         },
         search_term: {
@@ -78,6 +88,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         cursor: {
           type: "string",
           minLength: 1,
+          maxLength: 10000,
           description: "Opaque cursor returned by a prior thread/list call.",
         },
         limit: {
@@ -115,10 +126,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         thread_id: {
           type: "string",
           minLength: 1,
+          maxLength: 200,
           description: "Existing persistent Codex thread to resume. Omit to create a new thread.",
         },
         cwd: {
           type: "string",
+          maxLength: 1000,
           description: "Absolute Windows drive-letter cwd. Required for a new thread; optional override for resume.",
         },
         model: {
@@ -156,7 +169,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        thread_id: { type: "string", minLength: 1, description: "Codex thread to observe." },
+        thread_id: { type: "string", minLength: 1, maxLength: 200, description: "Codex thread to observe." },
         cursor: {
           type: "integer",
           minimum: 0,
@@ -197,10 +210,11 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        thread_id: { type: "string", minLength: 1, description: "Active Codex thread." },
+        thread_id: { type: "string", minLength: 1, maxLength: 200, description: "Active Codex thread." },
         expected_turn_id: {
           type: "string",
           minLength: 1,
+          maxLength: 200,
           description: "Exact active turn id required by app-server.",
         },
         text: { type: "string", minLength: 1, maxLength: 200000, description: "Additional user text." },
@@ -228,9 +242,9 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           oneOf: [{ type: "string", minLength: 1 }, { type: "integer" }],
           description: "Original app-server JSON-RPC request id, preserving string or integer type.",
         },
-        thread_id: { type: "string", minLength: 1, description: "Exact pending-request thread scope." },
-        turn_id: { type: "string", minLength: 1, description: "Exact turn scope when the pending request has one." },
-        method: { type: "string", minLength: 1, description: "Exact app-server request method." },
+        thread_id: { type: "string", minLength: 1, maxLength: 200, description: "Exact pending-request thread scope." },
+        turn_id: { type: "string", minLength: 1, maxLength: 200, description: "Exact turn scope when the pending request has one." },
+        method: { type: "string", minLength: 1, maxLength: 300, description: "Exact app-server request method." },
         decision: {
           type: "string",
           enum: ["accept", "acceptForSession", "decline", "cancel"],
@@ -285,8 +299,8 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        thread_id: { type: "string", minLength: 1, description: "Active Codex thread." },
-        turn_id: { type: "string", minLength: 1, description: "Active Codex turn to interrupt." },
+        thread_id: { type: "string", minLength: 1, maxLength: 200, description: "Active Codex thread." },
+        turn_id: { type: "string", minLength: 1, maxLength: 200, description: "Active Codex turn to interrupt." },
       },
       required: ["thread_id", "turn_id"],
       additionalProperties: false,
@@ -506,6 +520,24 @@ function extractTurnId(result: unknown, method: string): string {
     throw new Error(`${method} returned no turn id`);
   }
   return turn.id;
+}
+
+function extractSandboxPolicy(
+  result: unknown,
+  method: string,
+  requestedSandbox: PublicSandboxMode,
+): Record<string, unknown> {
+  const policy = asObject(
+    asObject(result, `${method} result`).sandbox,
+    `${method} result.sandbox`,
+  );
+  const expectedType = NATIVE_SANDBOX_POLICY_TYPE_BY_MODE[requestedSandbox];
+  if (policy.type !== expectedType) {
+    throw new Error(
+      `${method} returned sandbox policy type ${String(policy.type)} for requested ${requestedSandbox}`,
+    );
+  }
+  return policy;
 }
 
 function storedTerminal(threadResult: unknown): unknown {
@@ -749,13 +781,14 @@ export class ControlSurface {
           ...overrides,
           serviceName: "local-codex-bridge",
         });
-    const threadId = extractThreadId(
-      threadResult,
-      requestedThreadId ? "thread/resume" : "thread/start",
-    );
+    const threadMethod = requestedThreadId ? "thread/resume" : "thread/start";
+    const threadId = extractThreadId(threadResult, threadMethod);
     if (requestedThreadId && threadId !== requestedThreadId) {
       throw new Error("thread/resume returned a different thread id");
     }
+    const sandboxPolicy = sandbox
+      ? extractSandboxPolicy(threadResult, threadMethod, sandbox)
+      : undefined;
     this.appServer.runtime.ensureThread(threadId);
     const turnResult = await this.appServer.request("turn/start", {
       threadId,
@@ -763,6 +796,7 @@ export class ControlSurface {
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
+      ...(sandboxPolicy ? { sandboxPolicy } : {}),
       ...(approvalPolicy ? { approvalPolicy } : {}),
     });
     const turnId = extractTurnId(turnResult, "turn/start");
@@ -928,21 +962,22 @@ export class ControlSurface {
       response = asObject(generic, "response");
     }
 
-    const pending = this.appServer.runtime.takePending(requestId, {
+    const pending = this.appServer.runtime.claimPending(requestId, {
       threadId,
       method,
       ...(turnId ? { turnId } : {}),
     });
     if (pending.turnId && !turnId) {
-      this.appServer.runtime.restorePending(pending);
+      this.appServer.runtime.releasePending(pending);
       throw new Error("turn_id is required for this pending request");
     }
     try {
       await this.appServer.respond(requestId, response);
     } catch (error) {
-      this.appServer.runtime.restorePending(pending);
+      this.appServer.runtime.releasePending(pending);
       throw error;
     }
+    this.appServer.runtime.completePending(pending);
     return {
       responded: true,
       request_id: requestId,

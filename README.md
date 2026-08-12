@@ -8,9 +8,9 @@ Local Codex Bridge 是一个面向 Windows 的轻量 MCP stdio 桥接器：它�
 
 ## 当前公开版本
 
-**V2.1.1** · [查看更新日志](CHANGELOG.md)
+**V2.1.2** · [查看更新日志](CHANGELOG.md)
 
-本版本完成监督与控制边界加固，进一步明确超时、重复请求 ID 与待响应请求的安全语义。当前仍仅声明支持 Windows。
+本版本补齐晚到原生响应的保守对账、重复待响应 ID 与响应占用边界、原生 sandbox policy 传递，以及公开 schema 与运行时限制的一致性，并补全 V2.1.1 之后的公共历史记录。当前仍仅声明支持 Windows。
 
 ## 它是怎样工作的
 

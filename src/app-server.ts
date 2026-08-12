@@ -10,6 +10,9 @@ import {
 
 const MAX_JSONL_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_LATE_RESPONSE_TTL_MS = 60_000;
+const DEFAULT_LATE_RESPONSE_LIMIT = 256;
+const MAX_SCOPE_ID_CHARS = 200;
 const THREADLESS_REQUEST_ERROR = {
   code: -32601,
   message: "Unsupported app-server request without thread context",
@@ -29,10 +32,28 @@ interface PendingCall {
   timer: NodeJS.Timeout;
 }
 
+type LateResponseCandidate =
+  | { method: "thread/start" }
+  | { method: "thread/resume"; requestedThreadId: string }
+  | { method: "turn/start"; requestedThreadId: string }
+  | {
+      method: "turn/steer" | "turn/interrupt";
+      requestedThreadId: string;
+      requestedTurnId: string;
+    };
+
+interface RetainedLateResponse {
+  candidate: LateResponseCandidate;
+  timedOutAt: string;
+  expiresAtMs: number;
+}
+
 export interface AppServerLaunchOptions {
   executable?: string;
   prefixArgs?: readonly string[];
   requestTimeoutMs?: number;
+  lateResponseTtlMs?: number;
+  lateResponseLimit?: number;
 }
 
 function rpcKey(id: RpcId): string {
@@ -43,6 +64,50 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function boundedScopeId(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SCOPE_ID_CHARS
+    ? value
+    : undefined;
+}
+
+function positiveIntegerOption(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return resolved;
+}
+
+function lateResponseCandidate(
+  method: string,
+  params: unknown,
+): LateResponseCandidate | undefined {
+  if (method === "thread/start") {
+    return { method };
+  }
+  const record = asRecord(params);
+  if (method === "turn/steer" || method === "turn/interrupt") {
+    const requestedThreadId = boundedScopeId(record?.threadId);
+    const requestedTurnId = boundedScopeId(
+      method === "turn/steer" ? record?.expectedTurnId : record?.turnId,
+    );
+    return requestedThreadId && requestedTurnId
+      ? { method, requestedThreadId, requestedTurnId }
+      : undefined;
+  }
+  if (method !== "thread/resume" && method !== "turn/start") {
+    return undefined;
+  }
+  const requestedThreadId = boundedScopeId(record?.threadId);
+  return requestedThreadId ? { method, requestedThreadId } : undefined;
 }
 
 function messageFromUnknown(value: unknown): string {
@@ -195,7 +260,10 @@ export class AppServerManager {
   readonly #executable: string;
   readonly #prefixArgs: readonly string[];
   readonly #requestTimeoutMs: number;
+  readonly #lateResponseTtlMs: number;
+  readonly #lateResponseLimit: number;
   readonly #pendingCalls = new Map<string, PendingCall>();
+  readonly #lateResponses = new Map<string, RetainedLateResponse>();
   readonly #writeLine: (chunk: string) => Promise<void>;
 
   #child: ChildProcessWithoutNullStreams | null = null;
@@ -216,6 +284,16 @@ export class AppServerManager {
     this.#prefixArgs = options.prefixArgs ?? [];
     this.#requestTimeoutMs =
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#lateResponseTtlMs = positiveIntegerOption(
+      options.lateResponseTtlMs,
+      DEFAULT_LATE_RESPONSE_TTL_MS,
+      "lateResponseTtlMs",
+    );
+    this.#lateResponseLimit = positiveIntegerOption(
+      options.lateResponseLimit,
+      DEFAULT_LATE_RESPONSE_LIMIT,
+      "lateResponseLimit",
+    );
     this.#writeLine = createSerializedWriter(async (chunk) => {
       const child = this.#child;
       if (
@@ -317,7 +395,7 @@ export class AppServerManager {
           clientInfo: {
             name: "local-codex-bridge",
             title: "Local Codex Bridge",
-            version: "2.1.1",
+            version: "2.1.2",
           },
           capabilities: {
             experimentalApi: true,
@@ -348,23 +426,130 @@ export class AppServerManager {
   #request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
     const id = this.#nextRequestId;
     this.#nextRequestId += 1;
+    const key = rpcKey(id);
+    const lateCandidate = lateResponseCandidate(method, params);
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.#pendingCalls.delete(rpcKey(id));
+        if (!this.#pendingCalls.delete(key)) {
+          return;
+        }
+        if (lateCandidate) {
+          this.#retainLateResponse(key, lateCandidate);
+        }
         reject(requestTimeoutError(method));
       }, timeoutMs);
-      this.#pendingCalls.set(rpcKey(id), { method, resolve, reject, timer });
+      this.#pendingCalls.set(key, { method, resolve, reject, timer });
       void this.#write({ method, id, params }).catch((error: unknown) => {
-        const pending = this.#pendingCalls.get(rpcKey(id));
+        const pending = this.#pendingCalls.get(key);
         if (!pending) {
+          this.#lateResponses.delete(key);
           return;
         }
         clearTimeout(pending.timer);
-        this.#pendingCalls.delete(rpcKey(id));
+        this.#pendingCalls.delete(key);
         pending.reject(
           new Error(`Failed to write app-server request ${method}: ${messageFromUnknown(error)}`),
         );
       });
+    });
+  }
+
+  #retainLateResponse(key: string, candidate: LateResponseCandidate): void {
+    const now = Date.now();
+    for (const [retainedKey, retained] of this.#lateResponses) {
+      if (retained.expiresAtMs <= now) {
+        this.#lateResponses.delete(retainedKey);
+      }
+    }
+    while (this.#lateResponses.size >= this.#lateResponseLimit) {
+      const oldest = this.#lateResponses.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      this.#lateResponses.delete(oldest);
+    }
+    this.#lateResponses.set(key, {
+      candidate,
+      timedOutAt: new Date(now).toISOString(),
+      expiresAtMs: now + this.#lateResponseTtlMs,
+    });
+  }
+
+  #takeLateResponse(key: string): RetainedLateResponse | undefined {
+    const retained = this.#lateResponses.get(key);
+    if (!retained) {
+      return undefined;
+    }
+    this.#lateResponses.delete(key);
+    return retained.expiresAtMs > Date.now() ? retained : undefined;
+  }
+
+  #reconcileLateResponse(
+    retained: RetainedLateResponse,
+    response: Record<string, unknown>,
+  ): void {
+    if (response.error !== undefined && response.error !== null) {
+      const candidate = retained.candidate;
+      if (candidate.method !== "thread/start") {
+        const turnId = candidate.method === "turn/steer" || candidate.method === "turn/interrupt"
+          ? candidate.requestedTurnId
+          : undefined;
+        this.runtime.recordLateMutationError({
+          method: candidate.method,
+          threadId: candidate.requestedThreadId,
+          ...(turnId ? { turnId } : {}),
+          timedOutAt: retained.timedOutAt,
+          error: response.error,
+        });
+      }
+      return;
+    }
+    const result = asRecord(response.result);
+    if (!result) {
+      return;
+    }
+    const candidate = retained.candidate;
+    if (candidate.method === "thread/start" || candidate.method === "thread/resume") {
+      const threadId = boundedScopeId(asRecord(result.thread)?.id);
+      if (
+        !threadId ||
+        (candidate.method === "thread/resume" &&
+          threadId !== candidate.requestedThreadId)
+      ) {
+        return;
+      }
+      this.runtime.reconcileLateMutationSuccess({
+        method: candidate.method,
+        threadId,
+        timedOutAt: retained.timedOutAt,
+      });
+      return;
+    }
+
+    if (candidate.method === "turn/steer" || candidate.method === "turn/interrupt") {
+      this.runtime.reconcileLateMutationSuccess({
+        method: candidate.method,
+        threadId: candidate.requestedThreadId,
+        turnId: candidate.requestedTurnId,
+        timedOutAt: retained.timedOutAt,
+      });
+      return;
+    }
+
+    const turn = asRecord(result.turn);
+    const turnId = boundedScopeId(turn?.id);
+    if (!turnId) {
+      return;
+    }
+    const status = typeof turn?.status === "string" && turn.status.length > 0
+      ? turn.status
+      : undefined;
+    this.runtime.reconcileLateMutationSuccess({
+      method: candidate.method,
+      threadId: candidate.requestedThreadId,
+      turnId,
+      ...(status ? { status } : {}),
+      timedOutAt: retained.timedOutAt,
     });
   }
 
@@ -400,6 +585,9 @@ export class AppServerManager {
       }
       try {
         this.#dispatch(JSON.parse(line.toString("utf8")) as unknown);
+        if (this.#fatal) {
+          return;
+        }
       } catch (error) {
         this.#protocolFailure(`invalid app-server JSONL: ${messageFromUnknown(error)}`);
         return;
@@ -421,7 +609,7 @@ export class AppServerManager {
     if (method) {
       if (id !== undefined) {
         const recorded = this.runtime.recordServerRequest(id, method, record.params);
-        if (!recorded) {
+        if (recorded === "threadless") {
           void this.#write({
             id,
             error: THREADLESS_REQUEST_ERROR,
@@ -430,6 +618,10 @@ export class AppServerManager {
               `failed to reject unsupported app-server request: ${messageFromUnknown(error)}`,
             );
           });
+        } else if (recorded === "duplicate") {
+          this.#protocolFailure(
+            `app-server protocol anomaly: duplicate outstanding ${typeof id} request id`,
+          );
         }
       } else {
         this.runtime.recordNotification(method, record.params);
@@ -441,6 +633,10 @@ export class AppServerManager {
     }
     const pending = this.#pendingCalls.get(rpcKey(id));
     if (!pending) {
+      const retained = this.#takeLateResponse(rpcKey(id));
+      if (retained) {
+        this.#reconcileLateResponse(retained, record);
+      }
       return;
     }
     clearTimeout(pending.timer);
@@ -535,6 +731,7 @@ export class AppServerManager {
       pending.reject(error);
     }
     this.#pendingCalls.clear();
+    this.#lateResponses.clear();
   }
 
   async #close(): Promise<void> {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFile, rm } from "node:fs/promises";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -14,6 +15,8 @@ import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 const fakeCodex = fileURLToPath(new URL("../../test/fake-codex.mjs", import.meta.url));
 const timeoutCodex = fileURLToPath(new URL("../../test/timeout-codex.mjs", import.meta.url));
 const pendingWriteCodex = fileURLToPath(new URL("../../test/pending-write-codex.mjs", import.meta.url));
+const lateResponseCodex = fileURLToPath(new URL("../../test/late-response-codex.mjs", import.meta.url));
+const duplicateRequestCodex = fileURLToPath(new URL("../../test/duplicate-request-codex.mjs", import.meta.url));
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -233,6 +236,247 @@ test("mutating timeout stays UNKNOWN while the native write remains pending", as
     assert.deepEqual(await manager.request("test/after", {}), { after: true });
   } finally {
     await manager.close();
+  }
+});
+
+test("late turn/start responses reconcile conservatively around native notifications", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [lateResponseCodex, "120"],
+    requestTimeoutMs: 30,
+  });
+  try {
+    const threadIds = [
+      "thread-no-notification",
+      "thread-native-started",
+      "thread-native-terminal",
+    ];
+    await Promise.all(threadIds.map(async (threadId) => {
+      await assert.rejects(
+        manager.request("turn/start", { threadId, input: [] }),
+        /operation outcome is UNKNOWN/,
+      );
+    }));
+    await delay(170);
+
+    const noNotification = manager.runtime.observe("thread-no-notification", 0, 10)!;
+    assert.equal(noNotification.active_turn_id, "turn-thread-no-notification");
+    assert.equal(
+      (noNotification.events.at(-1)?.data as Record<string, unknown>).action,
+      "turn_activated",
+    );
+
+    const nativeStarted = manager.runtime.observe("thread-native-started", 0, 10)!;
+    assert.equal(nativeStarted.active_turn_id, "turn-thread-native-started");
+    assert.equal(
+      (nativeStarted.events.at(-1)?.data as Record<string, unknown>).reason,
+      "turn_already_active",
+    );
+
+    const nativeTerminal = manager.runtime.observe("thread-native-terminal", 0, 10)!;
+    assert.equal(nativeTerminal.active_turn_id, null);
+    assert.equal(nativeTerminal.terminal?.turn_id, "turn-thread-native-terminal");
+    assert.equal(nativeTerminal.terminal?.final_result, "TERMINAL");
+    assert.equal(
+      (nativeTerminal.events.at(-1)?.data as Record<string, unknown>).reason,
+      "terminal_present",
+    );
+
+    const state = await manager.request("test/state", {}) as Record<string, unknown>;
+    assert.equal(state.turnStart, 3);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("late thread/start and thread/resume become observable without a follow-on turn", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [lateResponseCodex, "120"],
+    requestTimeoutMs: 30,
+  });
+  const control = new ControlSurface(manager);
+  try {
+    await assert.rejects(
+      control.call("codex_turn", { text: "new thread", cwd: "D:\\Bridge" }),
+      /operation outcome is UNKNOWN/,
+    );
+    await assert.rejects(
+      control.call("codex_turn", {
+        text: "resume thread",
+        thread_id: "thread-resume-late",
+      }),
+      /operation outcome is UNKNOWN/,
+    );
+    await delay(170);
+
+    assert.equal(manager.runtime.observe("late-thread-1", 0, 10)?.runtime_status, "idle");
+    assert.equal(manager.runtime.observe("thread-resume-late", 0, 10)?.runtime_status, "idle");
+    const state = await manager.request("test/state", {}) as Record<string, unknown>;
+    assert.equal(state.threadStart, 1);
+    assert.equal(state.threadResume, 1);
+    assert.equal(state.turnStart, 0);
+    assert.equal(state.turnInterrupt, 0);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("late steer and interrupt acknowledgements are observable without lifecycle mutation", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [lateResponseCodex, "120"],
+    requestTimeoutMs: 30,
+  });
+  manager.runtime.markTurnAccepted("thread-steer-late", "turn-steer-late");
+  manager.runtime.markTurnAccepted("thread-interrupt-late", "turn-interrupt-late");
+  manager.runtime.markTurnAccepted("thread-steer-error", "turn-steer-error");
+  try {
+    await Promise.all([
+      assert.rejects(
+        manager.request("turn/steer", {
+          threadId: "thread-steer-late",
+          expectedTurnId: "turn-steer-late",
+          input: [],
+        }),
+        /operation outcome is UNKNOWN/,
+      ),
+      assert.rejects(
+        manager.request("turn/interrupt", {
+          threadId: "thread-interrupt-late",
+          turnId: "turn-interrupt-late",
+        }),
+        /operation outcome is UNKNOWN/,
+      ),
+      assert.rejects(
+        manager.request("turn/steer", {
+          threadId: "thread-steer-error",
+          expectedTurnId: "turn-steer-error",
+          input: [],
+          testLateError: true,
+        }),
+        /operation outcome is UNKNOWN/,
+      ),
+    ]);
+    await delay(170);
+
+    for (const [threadId, turnId] of [
+      ["thread-steer-late", "turn-steer-late"],
+      ["thread-interrupt-late", "turn-interrupt-late"],
+    ] as const) {
+      const observed = manager.runtime.observe(threadId, 0, 10)!;
+      assert.equal(observed.active_turn_id, turnId);
+      assert.equal(
+        (observed.events.at(-1)?.data as Record<string, unknown>).reason,
+        "late_success_no_lifecycle_change",
+      );
+    }
+    const errored = manager.runtime.observe("thread-steer-error", 0, 10)!;
+    assert.equal(errored.active_turn_id, "turn-steer-error");
+    const errorData = errored.events.at(-1)?.data as Record<string, unknown>;
+    assert.equal(errorData.reason, "late_error");
+    assert.doesNotMatch(
+      JSON.stringify(errorData.error),
+      /FAKE_FIXTURE_SECRET_1234567890/,
+    );
+    assert.match(JSON.stringify(errorData.error), /REDACTED/);
+
+    const state = await manager.request("test/state", {}) as Record<string, unknown>;
+    assert.equal(state.turnSteer, 2);
+    assert.equal(state.turnInterrupt, 1);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("late response retention expires, evicts oldest entries, and consumes unscoped errors", async () => {
+  const expiring = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [lateResponseCodex, "120"],
+    requestTimeoutMs: 20,
+    lateResponseTtlMs: 35,
+  });
+  try {
+    await assert.rejects(
+      expiring.request("thread/start", { testThreadId: "thread-expired" }),
+      /operation outcome is UNKNOWN/,
+    );
+    await delay(170);
+    assert.equal(expiring.runtime.hasThread("thread-expired"), false);
+  } finally {
+    await expiring.close();
+  }
+
+  const capped = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [lateResponseCodex, "120"],
+    requestTimeoutMs: 20,
+    lateResponseTtlMs: 500,
+    lateResponseLimit: 2,
+  });
+  try {
+    await Promise.all(["thread-cap-1", "thread-cap-2", "thread-cap-3"].map(async (threadId) => {
+      await assert.rejects(
+        capped.request("thread/start", { testThreadId: threadId }),
+        /operation outcome is UNKNOWN/,
+      );
+    }));
+    await delay(170);
+    assert.equal(capped.runtime.hasThread("thread-cap-1"), false);
+    assert.equal(capped.runtime.hasThread("thread-cap-2"), true);
+    assert.equal(capped.runtime.hasThread("thread-cap-3"), true);
+
+    await assert.rejects(
+      capped.request("thread/start", {
+        testThreadId: "thread-after-error",
+        testLateError: true,
+      }),
+      /operation outcome is UNKNOWN/,
+    );
+    await delay(180);
+    assert.equal(capped.runtime.hasThread("thread-after-error"), false);
+  } finally {
+    await capped.close();
+  }
+});
+
+test("duplicate app-server request ids fail the protocol without an ambiguous response", async () => {
+  const logPath = fileURLToPath(new URL(
+    `../../test/.duplicate-request-${process.pid}-${Date.now()}.log`,
+    import.meta.url,
+  ));
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [duplicateRequestCodex, logPath],
+    requestTimeoutMs: 2_000,
+  });
+  try {
+    await assert.rejects(
+      manager.request("test/duplicate", {}),
+      /protocol anomaly: duplicate outstanding number request id/,
+    );
+    assert.equal(manager.runtime.hasThread("thread-duplicate"), false);
+    const original = manager.runtime.observe("thread-original", 0, 10)!;
+    const stringTyped = manager.runtime.observe("thread-string", 0, 10)!;
+    assert.equal(original.events[0]?.method, "item/fileChange/requestApproval");
+    assert.equal(
+      ((original.events[0]?.data as Record<string, unknown>).params as Record<string, unknown>).marker,
+      "original",
+    );
+    assert.equal(stringTyped.events[0]?.method, "item/tool/requestUserInput");
+    assert.equal(
+      (stringTyped.events[0]?.data as Record<string, unknown>).request_id,
+      "17",
+    );
+  } finally {
+    await manager.close();
+  }
+  try {
+    const childLog = await readFile(logPath, "utf8");
+    assert.match(childLog, /stdin-closed/);
+    assert.doesNotMatch(childLog, /ambiguous-response/);
+  } finally {
+    await rm(logPath, { force: true });
   }
 });
 

@@ -34,6 +34,39 @@ export interface PendingServerRequest {
   receivedAt: string;
 }
 
+export type ServerRequestRecordResult =
+  | "recorded"
+  | "threadless"
+  | "duplicate";
+
+export type LateMutationSuccess =
+  | {
+      method: "thread/start" | "thread/resume";
+      threadId: string;
+      timedOutAt: string;
+    }
+  | {
+      method: "turn/start";
+      threadId: string;
+      turnId: string;
+      status?: string;
+      timedOutAt: string;
+    }
+  | {
+      method: "turn/steer" | "turn/interrupt";
+      threadId: string;
+      turnId: string;
+      timedOutAt: string;
+    };
+
+export interface LateMutationError {
+  method: "thread/resume" | "turn/start" | "turn/steer" | "turn/interrupt";
+  threadId: string;
+  turnId?: string;
+  timedOutAt: string;
+  error: unknown;
+}
+
 export interface TerminalSnapshot {
   turn_id: string;
   status: string;
@@ -300,6 +333,7 @@ function extractFinalFromTurn(params: unknown): string | undefined {
 export class RuntimeStore {
   readonly #threads = new Map<string, ThreadRuntime>();
   readonly #pending = new Map<string, PendingServerRequest>();
+  readonly #responding = new Map<string, PendingServerRequest>();
   readonly #turnToThread = new Map<string, string>();
   readonly #changeWaiters = new Map<string, Set<() => void>>();
 
@@ -351,6 +385,120 @@ export class RuntimeStore {
     this.#publishUx();
   }
 
+  reconcileLateMutationSuccess(input: LateMutationSuccess): void {
+    this.ensureThread(input.threadId);
+    const runtime = this.#threads.get(input.threadId)!;
+
+    if (!("turnId" in input)) {
+      this.#appendEvent(
+        runtime,
+        "appServer/lateResponseReconciled",
+        {
+          request_method: input.method,
+          action: "thread_observed",
+          reason: "late_success",
+          thread_id: input.threadId,
+          timed_out_at: input.timedOutAt,
+        },
+        undefined,
+      );
+      return;
+    }
+
+    if (input.method !== "turn/start") {
+      this.#appendEvent(
+        runtime,
+        "appServer/lateResponseReconciled",
+        {
+          request_method: input.method,
+          action: "state_preserved",
+          reason: "late_success_no_lifecycle_change",
+          thread_id: input.threadId,
+          turn_id: input.turnId,
+          timed_out_at: input.timedOutAt,
+        },
+        input.turnId,
+      );
+      return;
+    }
+
+    let action = "state_preserved";
+    let reason: string;
+    if (runtime.terminal?.turn_id === input.turnId) {
+      reason = "terminal_present";
+    } else if (runtime.activeTurnId === input.turnId) {
+      reason = "turn_already_active";
+    } else if (runtime.activeTurnId !== null) {
+      reason = "different_turn_active";
+    } else if (runtime.terminal !== null) {
+      const terminalAt = Date.parse(runtime.terminal.completed_at);
+      const timedOutAt = Date.parse(input.timedOutAt);
+      if (
+        !Number.isFinite(terminalAt) ||
+        !Number.isFinite(timedOutAt) ||
+        terminalAt >= timedOutAt
+      ) {
+        reason = "newer_terminal_present";
+      } else if (input.status !== undefined && input.status !== "inProgress") {
+        reason = "non_active_result_status";
+      } else {
+        runtime.activeTurnId = input.turnId;
+        runtime.status = "inProgress";
+        runtime.terminal = null;
+        runtime.agentText = "";
+        this.#turnToThread.set(input.turnId, input.threadId);
+        action = "turn_activated";
+        reason = "runtime_idle";
+      }
+    } else if (input.status !== undefined && input.status !== "inProgress") {
+      reason = "non_active_result_status";
+    } else {
+      runtime.activeTurnId = input.turnId;
+      runtime.status = "inProgress";
+      runtime.terminal = null;
+      runtime.agentText = "";
+      this.#turnToThread.set(input.turnId, input.threadId);
+      action = "turn_activated";
+      reason = "runtime_idle";
+    }
+
+    this.#appendEvent(
+      runtime,
+      "appServer/lateResponseReconciled",
+      {
+        request_method: input.method,
+        action,
+        reason,
+        thread_id: input.threadId,
+        turn_id: input.turnId,
+        timed_out_at: input.timedOutAt,
+      },
+      input.turnId,
+    );
+    if (action === "turn_activated") {
+      this.#publishUx();
+    }
+  }
+
+  recordLateMutationError(input: LateMutationError): void {
+    this.ensureThread(input.threadId);
+    const runtime = this.#threads.get(input.threadId)!;
+    this.#appendEvent(
+      runtime,
+      "appServer/lateResponseReconciled",
+      {
+        request_method: input.method,
+        action: "state_preserved",
+        reason: "late_error",
+        thread_id: input.threadId,
+        ...(input.turnId ? { turn_id: input.turnId } : {}),
+        timed_out_at: input.timedOutAt,
+        error: input.error,
+      },
+      input.turnId,
+    );
+  }
+
   recordNotification(method: string, params: unknown): void {
     const turnId = extractTurnId(params);
     const threadId = extractThreadId(params) ?? (turnId ? this.#turnToThread.get(turnId) : undefined);
@@ -358,8 +506,12 @@ export class RuntimeStore {
     if (method === "serverRequest/resolved") {
       const requestId = asRecord(params)?.requestId;
       if (typeof requestId === "string" || typeof requestId === "number") {
-        const pending = this.#pending.get(idKey(requestId));
-        this.#pending.delete(idKey(requestId));
+        const key = idKey(requestId);
+        const pending = this.#pending.get(key);
+        this.#pending.delete(key);
+        if (pending && this.#responding.get(key) === pending) {
+          this.#responding.delete(key);
+        }
         const runtime = pending ? this.#threads.get(pending.threadId) : undefined;
         if (runtime) {
           this.#signalChange(runtime);
@@ -427,11 +579,19 @@ export class RuntimeStore {
     this.#appendEvent(runtime, method, params, turnId);
   }
 
-  recordServerRequest(id: RpcId, method: string, params: unknown): boolean {
+  recordServerRequest(
+    id: RpcId,
+    method: string,
+    params: unknown,
+  ): ServerRequestRecordResult {
+    const key = idKey(id);
+    if (this.#pending.has(key)) {
+      return "duplicate";
+    }
     const extractedTurnId = extractTurnId(params);
     const threadId = extractThreadId(params) ?? (extractedTurnId ? this.#turnToThread.get(extractedTurnId) : undefined);
     if (!threadId) {
-      return false;
+      return "threadless";
     }
     this.ensureThread(threadId);
     const turnId = extractedTurnId ?? this.#threads.get(threadId)?.activeTurnId ?? undefined;
@@ -443,8 +603,6 @@ export class RuntimeStore {
       receivedAt: new Date().toISOString(),
       ...(turnId ? { turnId } : {}),
     };
-    const key = idKey(id);
-    const newlyObservable = !this.#pending.has(key);
     this.#pending.set(key, request);
     this.#appendEvent(
       this.#threads.get(threadId)!,
@@ -452,18 +610,18 @@ export class RuntimeStore {
       { request_id: id, params: request.params },
       turnId,
     );
-    this.#publishUx(newlyObservable ? {
+    this.#publishUx({
       kind: method === "item/tool/requestUserInput" || method.toLowerCase().includes("elicitation")
         ? "waiting_user_input"
         : "waiting_approval",
       thread_id: threadId,
       turn_id: turnId ?? null,
       status: "waiting",
-    } : undefined);
-    return true;
+    });
+    return "recorded";
   }
 
-  takePending(
+  claimPending(
     id: RpcId,
     expected: { threadId: string; method: string; turnId?: string },
   ): PendingServerRequest {
@@ -478,22 +636,35 @@ export class RuntimeStore {
     if (expected.turnId !== undefined && request.turnId !== expected.turnId) {
       throw new Error("Pending request scope does not match turn_id");
     }
-    this.#pending.delete(key);
-    const runtime = this.#threads.get(request.threadId);
-    if (runtime) {
-      this.#signalChange(runtime);
+    if (this.#responding.has(key)) {
+      throw new Error("Pending app-server request is already being answered");
     }
-    this.#publishUx();
+    this.#responding.set(key, request);
     return request;
   }
 
-  restorePending(request: PendingServerRequest): void {
-    this.#pending.set(idKey(request.rawId), request);
+  completePending(request: PendingServerRequest): void {
+    const key = idKey(request.rawId);
+    if (
+      this.#pending.get(key) !== request ||
+      this.#responding.get(key) !== request
+    ) {
+      return;
+    }
+    this.#pending.delete(key);
+    this.#responding.delete(key);
     const runtime = this.#threads.get(request.threadId);
     if (runtime) {
       this.#signalChange(runtime);
     }
     this.#publishUx();
+  }
+
+  releasePending(request: PendingServerRequest): void {
+    const key = idKey(request.rawId);
+    if (this.#responding.get(key) === request) {
+      this.#responding.delete(key);
+    }
   }
 
   markAppServerExited(message: string): void {
@@ -522,6 +693,7 @@ export class RuntimeStore {
     }
     const pendingThreadIds = new Set([...this.#pending.values()].map((request) => request.threadId));
     this.#pending.clear();
+    this.#responding.clear();
     for (const threadId of pendingThreadIds) {
       const runtime = this.#threads.get(threadId);
       if (runtime) {
@@ -614,6 +786,9 @@ export class RuntimeStore {
     for (const [key, request] of this.#pending) {
       if (request.threadId === threadId && (turnId === undefined || request.turnId === turnId)) {
         this.#pending.delete(key);
+        if (this.#responding.get(key) === request) {
+          this.#responding.delete(key);
+        }
         changed = true;
       }
     }

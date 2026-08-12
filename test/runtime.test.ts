@@ -85,14 +85,15 @@ test("runtime ring uses monotonic cursors, scopes pending raw ids, and captures 
     turnId: "turn-1",
     password: "secret",
   });
-  const pending = runtime.takePending("raw-7", {
+  const pending = runtime.claimPending("raw-7", {
     threadId: "thread-1",
     turnId: "turn-1",
     method: "item/fileChange/requestApproval",
   });
   assert.equal(pending.rawId, "raw-7");
+  runtime.completePending(pending);
   assert.throws(
-    () => runtime.takePending(7, {
+    () => runtime.claimPending(7, {
       threadId: "thread-1",
       method: "item/fileChange/requestApproval",
     }),
@@ -116,6 +117,181 @@ test("runtime ring uses monotonic cursors, scopes pending raw ids, and captures 
   assert.equal(observed.events.length, 2);
   assert.equal(observed.terminal?.final_result, "DONE");
   assert.equal(observed.runtime_status, "completed");
+});
+
+test("pending app-server request ids preserve typed identity and cannot be replaced while responding", () => {
+  const runtime = new RuntimeStore();
+  runtime.markTurnAccepted("thread-original", "turn-original");
+  assert.equal(
+    runtime.recordServerRequest(17, "item/fileChange/requestApproval", {
+      threadId: "thread-original",
+      turnId: "turn-original",
+      marker: "original",
+    }),
+    "recorded",
+  );
+  const original = runtime.claimPending(17, {
+    threadId: "thread-original",
+    turnId: "turn-original",
+    method: "item/fileChange/requestApproval",
+  });
+
+  assert.equal(
+    runtime.recordServerRequest(17, "item/commandExecution/requestApproval", {
+      threadId: "thread-duplicate",
+      turnId: "turn-duplicate",
+      marker: "must-not-replace",
+    }),
+    "duplicate",
+  );
+  assert.equal(
+    runtime.recordServerRequest("17", "item/tool/requestUserInput", {
+      threadId: "thread-string",
+      turnId: "turn-string",
+    }),
+    "recorded",
+  );
+  assert.equal(runtime.hasThread("thread-duplicate"), false);
+  const stillOriginal = runtime.pendingForThread("thread-original") as Array<Record<string, unknown>>;
+  assert.equal(stillOriginal.length, 1);
+  assert.equal(stillOriginal[0]?.request_id, 17);
+  assert.equal(
+    ((stillOriginal[0]?.params as Record<string, unknown>).marker),
+    "original",
+  );
+  assert.equal(
+    (runtime.pendingForThread("thread-string")[0] as Record<string, unknown>).request_id,
+    "17",
+  );
+
+  runtime.releasePending(original);
+  const retried = runtime.claimPending(17, {
+    threadId: "thread-original",
+    turnId: "turn-original",
+    method: "item/fileChange/requestApproval",
+  });
+  runtime.releasePending(retried);
+
+  runtime.recordNotification("serverRequest/resolved", {
+    threadId: "thread-original",
+    turnId: "turn-original",
+    requestId: 17,
+  });
+  assert.equal(
+    runtime.recordServerRequest(17, "item/fileChange/requestApproval", {
+      threadId: "thread-reused",
+      turnId: "turn-reused",
+      marker: "reused",
+    }),
+    "recorded",
+  );
+  runtime.completePending(original);
+  runtime.releasePending(original);
+  const reused = runtime.pendingForThread("thread-reused") as Array<Record<string, unknown>>;
+  assert.equal(reused.length, 1);
+  assert.equal((reused[0]?.params as Record<string, unknown>).marker, "reused");
+});
+
+test("late turn acknowledgements preserve same-turn terminals but replace older terminal state", () => {
+  const sameTurn = new RuntimeStore();
+  sameTurn.markTurnAccepted("thread-same-terminal", "turn-terminal");
+  sameTurn.recordNotification("turn/completed", {
+    threadId: "thread-same-terminal",
+    turn: {
+      id: "turn-terminal",
+      status: "completed",
+      items: [{ type: "agentMessage", text: "DONE" }],
+    },
+  });
+  sameTurn.reconcileLateMutationSuccess({
+    method: "turn/start",
+    threadId: "thread-same-terminal",
+    turnId: "turn-terminal",
+    status: "inProgress",
+    timedOutAt: "2026-08-12T00:00:00.000Z",
+  });
+  const preserved = sameTurn.observe("thread-same-terminal", 0, 10)!;
+  assert.equal(preserved.active_turn_id, null);
+  assert.equal(preserved.terminal?.turn_id, "turn-terminal");
+  assert.equal(
+    (preserved.events.at(-1)?.data as Record<string, unknown>).reason,
+    "terminal_present",
+  );
+
+  const oldTerminal = new RuntimeStore();
+  oldTerminal.markTurnAccepted("thread-old-terminal", "turn-old");
+  oldTerminal.recordNotification("item/completed", {
+    threadId: "thread-old-terminal",
+    turnId: "turn-old",
+    item: { type: "agentMessage", text: "OLD_TEXT" },
+  });
+  oldTerminal.recordNotification("turn/completed", {
+    threadId: "thread-old-terminal",
+    turn: { id: "turn-old", status: "completed", items: [] },
+  });
+  const timeoutAfterOldTerminal = new Date(Date.now() + 1_000).toISOString();
+  oldTerminal.reconcileLateMutationSuccess({
+    method: "turn/start",
+    threadId: "thread-old-terminal",
+    turnId: "turn-new",
+    status: "inProgress",
+    timedOutAt: timeoutAfterOldTerminal,
+  });
+  const activated = oldTerminal.observe("thread-old-terminal", 0, 10)!;
+  assert.equal(activated.active_turn_id, "turn-new");
+  assert.equal(activated.terminal, null);
+  assert.equal(
+    (activated.events.at(-1)?.data as Record<string, unknown>).action,
+    "turn_activated",
+  );
+  oldTerminal.recordNotification("turn/completed", {
+    threadId: "thread-old-terminal",
+    turn: { id: "turn-new", status: "completed", items: [] },
+  });
+  assert.equal(
+    oldTerminal.observe("thread-old-terminal", 0, 20)?.terminal?.final_result,
+    null,
+  );
+
+  const newerActive = new RuntimeStore();
+  newerActive.markTurnAccepted("thread-newer", "turn-current");
+  newerActive.reconcileLateMutationSuccess({
+    method: "turn/start",
+    threadId: "thread-newer",
+    turnId: "turn-stale",
+    status: "inProgress",
+    timedOutAt: "2026-08-12T00:00:02.000Z",
+  });
+  assert.equal(
+    newerActive.observe("thread-newer", 0, 10)?.active_turn_id,
+    "turn-current",
+  );
+
+  const newerTerminal = new RuntimeStore();
+  const timeoutBeforeNewerTerminal = new Date(Date.now() - 1_000).toISOString();
+  newerTerminal.markTurnAccepted("thread-newer-terminal", "turn-newer");
+  newerTerminal.recordNotification("turn/completed", {
+    threadId: "thread-newer-terminal",
+    turn: { id: "turn-newer", status: "completed", items: [] },
+  });
+  newerTerminal.reconcileLateMutationSuccess({
+    method: "turn/start",
+    threadId: "thread-newer-terminal",
+    turnId: "turn-stale-different",
+    status: "inProgress",
+    timedOutAt: timeoutBeforeNewerTerminal,
+  });
+  const newerTerminalObserved = newerTerminal.observe(
+    "thread-newer-terminal",
+    0,
+    10,
+  )!;
+  assert.equal(newerTerminalObserved.active_turn_id, null);
+  assert.equal(newerTerminalObserved.terminal?.turn_id, "turn-newer");
+  assert.equal(
+    (newerTerminalObserved.events.at(-1)?.data as Record<string, unknown>).reason,
+    "newer_terminal_present",
+  );
 });
 
 test("observe wait defaults to immediate and buffered events bypass waiting", async () => {

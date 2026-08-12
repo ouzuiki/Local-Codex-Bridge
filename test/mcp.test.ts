@@ -136,6 +136,14 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
       (initialized.result as Record<string, unknown>).protocolVersion,
       "2025-03-26",
     );
+    assert.deepEqual(
+      (initialized.result as Record<string, unknown>).serverInfo,
+      {
+        name: "local-codex-bridge",
+        title: "Local Codex Bridge",
+        version: "2.1.2",
+      },
+    );
 
     // A second initialize reuses the first negotiated result with its own response id.
     const repeated = await client.request(0, "initialize", {

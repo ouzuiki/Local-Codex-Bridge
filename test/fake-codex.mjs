@@ -27,7 +27,18 @@ lines.on("line", (line) => {
   if (message.method === "thread/start") {
     threadCounter += 1;
     currentThread = `thread-${threadCounter}`;
-    send({ id: message.id, result: { thread: { id: currentThread, cwd: message.params.cwd } } });
+    const policyType = {
+      "read-only": "readOnly",
+      "workspace-write": "workspaceWrite",
+      "danger-full-access": "dangerFullAccess",
+    }[message.params.sandbox];
+    send({
+      id: message.id,
+      result: {
+        thread: { id: currentThread, cwd: message.params.cwd },
+        ...(policyType ? { sandbox: { type: policyType } } : {}),
+      },
+    });
     return;
   }
   if (message.method === "thread/resume") {

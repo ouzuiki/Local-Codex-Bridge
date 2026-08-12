@@ -289,7 +289,7 @@ export class McpStdioServer {
         serverInfo: {
           name: "local-codex-bridge",
           title: "Local Codex Bridge",
-          version: "2.1.1",
+          version: "2.1.2",
         },
       };
       this.#initializeCompatibility = compatibility;
