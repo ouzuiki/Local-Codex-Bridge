@@ -69,7 +69,7 @@ class Session {
     await this.request("initialize", {
       protocolVersion: "2025-11-25",
       capabilities: {},
-      clientInfo: { name: "local-codex-bridge-live-smoke", version: "1.0.0" },
+      clientInfo: { name: "v2-live-smoke", version: "1.0.0" },
     });
     this.child.stdin.write(
       `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
@@ -91,7 +91,7 @@ class Session {
     return await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.child.kill();
-        reject(new Error(`Local Codex Bridge did not exit after stdin EOF. stderr: ${this.stderr}`));
+        reject(new Error(`V2 did not exit after stdin EOF. stderr: ${this.stderr}`));
       }, 8_000);
       this.child.once("exit", (code) => {
         clearTimeout(timer);
@@ -138,7 +138,7 @@ try {
     cwd: smokeCwd,
     sandbox: "read-only",
     approval_policy: "never",
-    text: "Read-only smoke: run PowerShell Start-Sleep -Seconds 6, then read package.json without modifying anything, and finish with exactly BRIDGE_SMOKE_OK.",
+    text: "Read-only smoke: run PowerShell Start-Sleep -Seconds 6, then read package.json without modifying anything, and finish with exactly V2_SMOKE_OK.",
   });
   const acceptedMs = Date.now() - startedAt;
   const immediate = await first.call("codex_observe", {
@@ -150,8 +150,8 @@ try {
     throw new Error("codex_turn did not demonstrably return before terminal completion");
   }
   const finished = await observeToTerminal(first, started.thread_id, 0);
-  if (!String(finished.observed.terminal.final_result).includes("BRIDGE_SMOKE_OK")) {
-    throw new Error("First live turn did not produce BRIDGE_SMOKE_OK");
+  if (!String(finished.observed.terminal.final_result).includes("V2_SMOKE_OK")) {
+    throw new Error("First live turn did not produce V2_SMOKE_OK");
   }
   summary.first_turn = {
     thread_id: started.thread_id,
@@ -161,7 +161,7 @@ try {
     observed_events: finished.eventCount,
     terminal_status: finished.observed.terminal.status,
   };
-  if ((await first.close()) !== 0) throw new Error("First Bridge process exited nonzero");
+  if ((await first.close()) !== 0) throw new Error("First V2 process exited nonzero");
   first = null;
 
   const second = new Session();
@@ -178,7 +178,7 @@ try {
       thread_id: started.thread_id,
       include_turns: true,
     });
-    if (!String(lastPersistedAgentMessage(read)).includes("BRIDGE_SMOKE_OK")) {
+    if (!String(lastPersistedAgentMessage(read)).includes("V2_SMOKE_OK")) {
       throw new Error("Restarted app-server thread/read did not recover the stored final answer");
     }
     const recovered = await second.call("codex_observe", {
@@ -188,7 +188,7 @@ try {
     if (recovered.runtime_available !== false || recovered.live_state_reconstructable !== false) {
       throw new Error("Restart recovery did not use the thread/read fallback");
     }
-    if (!String(recovered.terminal?.final_result).includes("BRIDGE_SMOKE_OK")) {
+    if (!String(recovered.terminal?.final_result).includes("V2_SMOKE_OK")) {
       throw new Error("Restart recovery did not recover the stored final answer");
     }
     summary.restart_recovery = {
@@ -204,7 +204,7 @@ try {
       cwd: smokeCwd,
       sandbox: "read-only",
       approval_policy: "untrusted",
-      text: "Read-only staged smoke: use the command tool to run exactly PowerShell -NoProfile -Command \"Start-Sleep -Seconds 15; Get-Content -LiteralPath package.json -TotalCount 1\". Do not modify anything. Only after the command finishes, answer BRIDGE_UNSTEERED.",
+      text: "Read-only staged smoke: use the command tool to run exactly PowerShell -NoProfile -Command \"Start-Sleep -Seconds 15; Get-Content -LiteralPath package.json -TotalCount 1\". Do not modify anything. Only after the command finishes, answer V2_UNSTEERED.",
     });
     let stagedState = null;
     let pendingApproval = null;
@@ -233,7 +233,7 @@ try {
     const steered = await second.call("codex_steer", {
       thread_id: staged.thread_id,
       expected_turn_id: staged.turn_id,
-      text: "For this same active turn, read tsconfig.json instead and finish with exactly BRIDGE_STEERED_OK. Do not modify files.",
+      text: "For this same active turn, read tsconfig.json instead and finish with exactly V2_STEERED_OK. Do not modify files.",
     });
     if (steered.turn_id !== staged.turn_id) {
       throw new Error("turn/steer changed the turn id");
@@ -290,8 +290,8 @@ try {
         }
       },
     );
-    if (!String(steerFinished.observed.terminal.final_result).includes("BRIDGE_STEERED_OK")) {
-      throw new Error("Steered turn did not produce BRIDGE_STEERED_OK");
+    if (!String(steerFinished.observed.terminal.final_result).includes("V2_STEERED_OK")) {
+      throw new Error("Steered turn did not produce V2_STEERED_OK");
     }
     summary.steer = {
       thread_id: staged.thread_id,
@@ -304,7 +304,7 @@ try {
       approval_responded: approvalResponded,
     };
   } finally {
-    if ((await second.close()) !== 0) throw new Error("Second Bridge process exited nonzero");
+    if ((await second.close()) !== 0) throw new Error("Second V2 process exited nonzero");
   }
 } finally {
   if (first) await first.close();

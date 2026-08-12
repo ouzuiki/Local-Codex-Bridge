@@ -8,6 +8,7 @@ import {
 import { dirname, isAbsolute, resolve } from "node:path";
 
 export const UX_PROJECTION_ENV = "LOCAL_CODEX_BRIDGE_UX_PROJECTION";
+export const LEGACY_UX_PROJECTION_ENV = "LUMEN_CODEX_V2_UX_PROJECTION";
 
 export interface UxCounts {
   active: number;
@@ -109,6 +110,8 @@ export class AtomicUxProjection implements UxProjectionSink {
 export function createUxProjectionFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
 ): UxProjectionSink | undefined {
-  const configured = environment[UX_PROJECTION_ENV]?.trim();
+  const configured =
+    environment[UX_PROJECTION_ENV]?.trim() ||
+    environment[LEGACY_UX_PROJECTION_ENV]?.trim();
   return configured ? new AtomicUxProjection(resolve(configured)) : undefined;
 }

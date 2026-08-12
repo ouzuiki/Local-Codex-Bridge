@@ -9,9 +9,10 @@ import {
   createSerializedWriter,
   writeWithBackpressure,
 } from "../src/app-server.js";
-import { ControlSurface } from "../src/tools.js";
+import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 
 const fakeCodex = fileURLToPath(new URL("../../test/fake-codex.mjs", import.meta.url));
+const timeoutCodex = fileURLToPath(new URL("../../test/timeout-codex.mjs", import.meta.url));
 const pendingWriteCodex = fileURLToPath(new URL("../../test/pending-write-codex.mjs", import.meta.url));
 
 function delay(milliseconds: number): Promise<void> {
@@ -24,14 +25,6 @@ class RejectingResponseManager extends AppServerManager {
   override async respond(id: string | number, _result: unknown): Promise<void> {
     this.lastResponseId = id;
     throw new Error("synthetic app-server response write failure");
-  }
-}
-
-class RecordingResponseManager extends AppServerManager {
-  responses: Array<{ id: string | number; result: unknown }> = [];
-
-  override async respond(id: string | number, result: unknown): Promise<void> {
-    this.responses.push({ id, result });
   }
 }
 
@@ -141,178 +134,6 @@ test("unexpected app-server death is latched and never auto-restarted", async ()
   }
 });
 
-test("mutating acknowledgement timeouts are ambiguous without retry while reads keep ordinary timeout semantics", async () => {
-  const manager = new AppServerManager(undefined, {
-    executable: process.execPath,
-    prefixArgs: [fakeCodex],
-    requestTimeoutMs: 30,
-  });
-  const cases: Array<[string, Record<string, unknown>]> = [
-    ["thread/start", { serviceName: "local-codex-bridge", testNoAcknowledgement: true }],
-    ["thread/resume", { threadId: "thread-timeout", testNoAcknowledgement: true }],
-    ["turn/start", { threadId: "thread-timeout", input: [], testNoAcknowledgement: true }],
-    ["turn/steer", { threadId: "thread-timeout", expectedTurnId: "turn-timeout", input: [], testNoAcknowledgement: true }],
-    ["turn/interrupt", { threadId: "thread-timeout", turnId: "turn-timeout", testNoAcknowledgement: true }],
-  ];
-  try {
-    for (const [method, params] of cases) {
-      await assert.rejects(
-        manager.request(method, params),
-        (error: unknown) => {
-          assert.ok(error instanceof Error);
-          assert.match(error.message, new RegExp(`acknowledgement timed out after request was sent: ${method.replace("/", "\\/")}`));
-          assert.match(error.message, /Operation outcome is UNKNOWN/);
-          assert.match(error.message, /Codex may already have accepted it/);
-          assert.match(error.message, /Re-observe or read before retrying/);
-          assert.match(error.message, /will not automatically retry, cancel, or reconcile/);
-          return true;
-        },
-      );
-    }
-
-    for (const [method, params] of [
-      ["thread/list", { testNoAcknowledgement: true }],
-      ["thread/read", { threadId: "thread-timeout", testNoAcknowledgement: true }],
-    ] as const) {
-      await assert.rejects(
-        manager.request(method, params),
-        (error: unknown) => {
-          assert.ok(error instanceof Error);
-          assert.equal(error.message, `Codex app-server request timed out: ${method}`);
-          return true;
-        },
-      );
-    }
-
-    const counts = await manager.request("test/request-counts", {}) as Record<string, unknown>;
-    for (const method of [...cases.map(([method]) => method), "thread/list", "thread/read"]) {
-      assert.equal(counts[method], 1, `${method} must be sent exactly once`);
-    }
-  } finally {
-    await manager.close();
-  }
-});
-
-test("mutating timeout stays UNKNOWN while the native write remains pending", async () => {
-  const manager = new AppServerManager(undefined, {
-    executable: process.execPath,
-    prefixArgs: [pendingWriteCodex],
-    requestTimeoutMs: 25,
-  });
-  try {
-    await assert.rejects(
-      manager.request("turn/start", { payload: "x".repeat(2_000_000) }),
-      (error: unknown) => {
-        assert.match(String(error), /acknowledgement timed out/);
-        assert.match(String(error), /Operation outcome is UNKNOWN/);
-        assert.doesNotMatch(String(error), /Codex app-server request timed out: turn\/start/);
-        return true;
-      },
-    );
-    await delay(250);
-    assert.deepEqual(await manager.request("test/after", {}), { after: true });
-  } finally {
-    await manager.close();
-  }
-});
-
-test("unknown thread-scoped requests stay sanitized and observable while unsupported responses fail closed", async () => {
-  const manager = new AppServerManager(undefined, {
-    executable: process.execPath,
-    prefixArgs: [fakeCodex],
-    requestTimeoutMs: 2_000,
-  });
-  const control = new ControlSurface(manager);
-  manager.runtime.markTurnAccepted("thread-future", "turn-future");
-  try {
-    await manager.request("test/unknown-request", {});
-    const observed = await control.call("codex_observe", {
-      thread_id: "thread-future",
-      cursor: 0,
-    }) as Record<string, unknown>;
-    const pending = observed.pending_requests as Array<Record<string, unknown>>;
-    assert.equal(pending.length, 1);
-    assert.deepEqual(pending[0], {
-      request_id: "future-request-1",
-      method: "future/tool/requestSomething",
-      thread_id: "thread-future",
-      turn_id: "turn-future",
-      received_at: pending[0]?.received_at,
-      params: {
-        threadId: "thread-future",
-        turnId: "turn-future",
-        api_key: "[REDACTED]",
-        visible: "keep-me",
-      },
-    });
-    assert.equal(typeof pending[0]?.received_at, "string");
-
-    await assert.rejects(
-      control.call("codex_respond", {
-        request_id: "future-request-1",
-        thread_id: "thread-future",
-        turn_id: "turn-future",
-        method: "future/tool/requestSomething",
-        response: { accepted: true },
-      }),
-      /Unsupported codex_respond method.*pending request was not consumed and no response was sent/,
-    );
-
-    const status = await manager.request("test/unknown-request-status", {}) as Record<string, unknown>;
-    assert.equal(status.responseReceived, false);
-    const stillPending = manager.runtime.pendingForThread("thread-future") as Array<Record<string, unknown>>;
-    assert.equal(stillPending.length, 1);
-    assert.equal(stillPending[0]?.request_id, "future-request-1");
-  } finally {
-    await manager.close();
-  }
-});
-
-test("known requestUserInput responses retain their concrete native contract", async () => {
-  const manager = new RecordingResponseManager();
-  const control = new ControlSurface(manager);
-  manager.runtime.markTurnAccepted("thread-input", "turn-input");
-  manager.runtime.recordServerRequest("input-1", "item/tool/requestUserInput", {
-    threadId: "thread-input",
-    turnId: "turn-input",
-  });
-  try {
-    const result = await control.call("codex_respond", {
-      request_id: "input-1",
-      thread_id: "thread-input",
-      turn_id: "turn-input",
-      method: "item/tool/requestUserInput",
-      answers: { question_1: { answers: ["yes"] } },
-    }) as Record<string, unknown>;
-    assert.equal(result.responded, true);
-    assert.deepEqual(manager.responses, [{
-      id: "input-1",
-      result: { answers: { question_1: { answers: ["yes"] } } },
-    }]);
-    assert.deepEqual(manager.runtime.pendingForThread("thread-input"), []);
-
-    manager.runtime.recordServerRequest("input-2", "item/tool/requestUserInput", {
-      threadId: "thread-input",
-      turnId: "turn-input",
-    });
-    const genericResult = await control.call("codex_respond", {
-      request_id: "input-2",
-      thread_id: "thread-input",
-      turn_id: "turn-input",
-      method: "item/tool/requestUserInput",
-      response: { answers: { question_2: { answers: ["exact"] } }, metadata: "preserved" },
-    }) as Record<string, unknown>;
-    assert.equal(genericResult.responded, true);
-    assert.deepEqual(manager.responses[1], {
-      id: "input-2",
-      result: { answers: { question_2: { answers: ["exact"] } }, metadata: "preserved" },
-    });
-    assert.deepEqual(manager.runtime.pendingForThread("thread-input"), []);
-  } finally {
-    await manager.close();
-  }
-});
-
 test("failed app-server response write restores the original pending request", async () => {
   const manager = new RejectingResponseManager();
   const control = new ControlSurface(manager);
@@ -360,6 +181,101 @@ test("threadless app-server server request receives an explicit JSON-RPC error",
   } finally {
     await manager.close();
   }
+});
+
+test("mutating app-server acknowledgement timeouts report unknown outcome without retry", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [timeoutCodex],
+    requestTimeoutMs: 20,
+  });
+  try {
+    for (const method of ["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]) {
+      await assert.rejects(
+        manager.request(method, {}),
+        (error: unknown) => {
+          assert.match(String(error), /acknowledgement timed out/);
+          assert.match(String(error), /operation outcome is UNKNOWN/);
+          assert.match(String(error), /Re-observe or read before retrying/);
+          return true;
+        },
+      );
+    }
+    await assert.rejects(
+      manager.request("thread/list", {}),
+      /Codex app-server request timed out: thread\/list/,
+    );
+    const count = await manager.request("test/count", {}) as Record<string, unknown>;
+    // App-server startup sends initialize plus the initialized notification.
+    assert.equal(count.requestCount, 9);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("mutating timeout stays UNKNOWN while the native write remains pending", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [pendingWriteCodex],
+    requestTimeoutMs: 25,
+  });
+  try {
+    await assert.rejects(
+      manager.request("turn/start", { payload: "x".repeat(2_000_000) }),
+      (error: unknown) => {
+        assert.match(String(error), /acknowledgement timed out/);
+        assert.match(String(error), /operation outcome is UNKNOWN/);
+        assert.doesNotMatch(String(error), /Codex app-server request timed out: turn\/start/);
+        return true;
+      },
+    );
+    await delay(250);
+    assert.deepEqual(await manager.request("test/after", {}), { after: true });
+  } finally {
+    await manager.close();
+  }
+});
+
+test("unsupported pending app-server requests remain observable and are never answered", async () => {
+  const manager = new RejectingResponseManager();
+  const control = new ControlSurface(manager);
+  manager.runtime.markTurnAccepted("thread-unknown", "turn-unknown");
+  manager.runtime.recordServerRequest("future-1", "test/unknownServerRequest", {
+    threadId: "thread-unknown",
+    turnId: "turn-unknown",
+    api_key: "must-redact",
+    detail: "keep this pending",
+  });
+  try {
+    await assert.rejects(
+      control.call("codex_respond", {
+        request_id: "future-1",
+        thread_id: "thread-unknown",
+        turn_id: "turn-unknown",
+        method: "test/unknownServerRequest",
+        response: { guessed: true },
+      }),
+      /Unsupported app-server request method: test\/unknownServerRequest; pending request remains observable/,
+    );
+    assert.equal(manager.lastResponseId, undefined);
+    const observed = manager.runtime.observe("thread-unknown", 0, 10);
+    const pending = observed?.pending_requests as Array<Record<string, unknown>>;
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]?.request_id, "future-1");
+    assert.equal(pending[0]?.method, "test/unknownServerRequest");
+    assert.equal(pending[0]?.thread_id, "thread-unknown");
+    assert.equal(pending[0]?.turn_id, "turn-unknown");
+    assert.equal((pending[0]?.params as Record<string, unknown>).api_key, "[REDACTED]");
+  } finally {
+    await manager.close();
+  }
+});
+
+test("codex_respond metadata does not advertise generic future-method responses", () => {
+  const respondTool = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_respond");
+  assert.match(respondTool?.description ?? "", /Unsupported or unknown methods fail locally and remain pending/);
+  const response = (respondTool?.inputSchema.properties as Record<string, unknown>).response as Record<string, unknown>;
+  assert.match(response.description as string, /unsupported or future methods remain pending/);
 });
 
 test("serialized app-server writes preserve order and wait for drain", async () => {

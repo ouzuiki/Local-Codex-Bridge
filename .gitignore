@@ -8,3 +8,4 @@ _render_home/
 npm-debug.log*
 .env
 .env.*
+windows/local-settings.json

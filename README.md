@@ -58,10 +58,6 @@ Local Codex Bridge
 
 本项目不捆绑、也不依赖 `@openai/codex` npm 包。
 
-### 让 AI Agent 协助安装
-
-如果你把仓库交给 Codex、Claude Code、Kimi 或其他本地 AI Agent，请让它先阅读本页和 [`AGENTS.md`](AGENTS.md)，检查目标机器上真实的 Node.js、Codex、路径及可选 Tunnel 环境，再按实际情况适配；不要照抄示例路径、profile、端口或配置。
-
 ### 安装、构建与测试
 
 ```powershell
@@ -112,7 +108,7 @@ Tunnel 的安装、认证、profile、端口、ready endpoint 和进程生命周
 
 ## 可选：Windows Tray
 
-`windows/` 中的 Tray 是单独安装的 Tunnel client 的轻量启动与状态层，不是 Bridge 的必要组成部分。它要求调用者提供 readiness URL、profile 名称和 Tunnel 可执行文件：
+`windows/` 中的 Tray 是单独安装的 Tunnel client 的轻量启动与状态层，不是 Bridge 的必要组成部分。规范入口是 `LocalCodexBridgeTray.*`。它读取命令行参数、generic 环境变量，或本机 ignored 文件 `windows/local-settings.json`：
 
 ```powershell
 .\windows\LocalCodexBridgeTray.Debug.cmd `
@@ -121,18 +117,11 @@ Tunnel 的安装、认证、profile、端口、ready endpoint 和进程生命周
   -TunnelExecutable 'C:\path\to\tunnel-client.exe'
 ```
 
-日常隐藏启动也可以先设置环境变量，再使用 VBS launcher：
+本机 settings 文件的模板是 [`windows/local-settings.example.json`](windows/local-settings.example.json)，实际的 `windows/local-settings.json` 不进入 Git。解析优先级为：显式命令行参数、`LOCAL_CODEX_BRIDGE_*` 环境变量、旧的 `LUMEN_CODEX_V2_*` 环境变量、ignored local settings。新安装没有 local settings 时，Tray 会要求显式提供必要配置；不会把维护者机器的 profile、端口或可执行文件写入 tracked tree。
 
-```powershell
-$env:LOCAL_CODEX_BRIDGE_READY_URL = 'http://127.0.0.1:<port>/readyz'
-$env:LOCAL_CODEX_BRIDGE_TUNNEL_PROFILE = 'your-profile'
-$env:LOCAL_CODEX_BRIDGE_TUNNEL_EXE = 'C:\path\to\tunnel-client.exe'
-wscript.exe .\windows\LocalCodexBridgeTray.vbs
-```
+旧的 `LumenCodexControlV2Tray.*` launcher 文件名和旧环境变量仍作为兼容入口保留；它们只转发到同一份 canonical implementation，不代表第二套产品或第二套配置。现有旧 checkpoint/UX 路径也不会被迁移或删除。
 
 Tray 不会自动重启 Tunnel。它只检查配置的 readiness URL；停止时，也只会在可执行路径、命令行、profile、启动时间、PID 和 PID 文件重新核验一致后，停止由当前 Tray 实例启动的那个 Tunnel 进程。
-
-`LOCAL_CODEX_BRIDGE_PROJECTION_PATH` 可以覆盖 Tray 使用的投影文件位置。Tray 会把该位置作为 `LOCAL_CODEX_BRIDGE_UX_PROJECTION` 传给 Tunnel 子进程；未显式启用时，Bridge 不写 UX 投影。
 
 ## 安全与信任边界
 
@@ -151,7 +140,7 @@ Local Codex Bridge 不会创建新的操作系统沙箱。真正的文件、命�
 
 - 原生线程、回合、历史和最终输出由官方 Codex 持久化。
 - Bridge 的事件 ring、活动回合状态和 pending request 只在内存中存在。Bridge 重启后，`codex_observe` 可以回退读取持久历史，但会明确标记实时状态无法重建。
-- checkpoint 是独立的有界 JSON 文件，默认位于 `%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json`；可用 `LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR` 指定其他绝对目录。
+- 新安装的 checkpoint 默认位于 `%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json`；可用 `LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR` 指定其他绝对目录。若检测到既有旧默认目录，Bridge 会继续使用它；也可用旧的 `LUMEN_CODEX_V2_CHECKPOINT_DIR` 显式指定，不会自动迁移数据。
 - app-server 意外退出后会被锁定为失败状态，不会在同一个 Bridge 进程中自动重启。
 - 当前公开版本只声明支持 Windows：`cwd` 接受绝对盘符路径，不接受 UNC 或 Windows device path；Tray 还依赖 Windows PowerShell、Windows Forms 和 WMI/CIM。
 - 核心代码虽然是 TypeScript，但本仓库尚未声明或验证 macOS / Linux 支持。
@@ -177,8 +166,9 @@ npm test
 - `src/app-server.ts`：官方 Codex app-server 子进程与协议适配
 - `src/tools.ts`：7 个工具的 schema、校验和语义
 - `src/runtime.ts`：有界实时状态、事件与 pending request
-- `src/checkpoint.ts`：可选监督 checkpoint
-- `src/ux-projection.ts` 与 `windows/`：可选 Tray 投影和 Windows 交互
+- `src/checkpoint.ts`：可选监督 checkpoint 与旧目录兼容
+- `src/ux-projection.ts`：可选 UX 投影与旧环境变量兼容
+- `windows/`：可选 Tray、local settings 与 legacy launchers
 
 ## 许可证
 

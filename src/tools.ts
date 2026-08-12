@@ -38,7 +38,7 @@ const sandboxSchema = {
   description: "Codex app-server sandbox mode override.",
 };
 
-const SUPPORTED_RESPONSE_METHODS = new Set([
+const SUPPORTED_RESPOND_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "execCommandApproval",
@@ -220,7 +220,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_respond",
     title: "Respond to Codex Request",
     description:
-      "Answer one currently pending app-server request by its original raw JSON-RPC id and exact thread/method scope. Supports only command/file approval methods with concrete response contracts and item/tool/requestUserInput; unsupported methods remain pending and observable.",
+      "Answer one currently pending app-server server request by its original raw JSON-RPC id and exact thread/method scope. Supports the approval and item/tool/requestUserInput response contracts implemented by this facade. Unsupported or unknown methods fail locally and remain pending; do not guess a future response contract.",
     inputSchema: {
       type: "object",
       properties: {
@@ -257,7 +257,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         response: {
           type: "object",
           additionalProperties: true,
-          description: "Exact result object for the known item/tool/requestUserInput method.",
+          description: "Exact generic result object for item/tool/requestUserInput; unsupported or future methods remain pending and are rejected locally.",
         },
       },
       required: ["request_id", "thread_id", "method"],
@@ -839,12 +839,6 @@ export class ControlSurface {
   }
 
   async #respond(args: Record<string, unknown>): Promise<unknown> {
-    const method = requiredString(args, "method", 300);
-    if (!SUPPORTED_RESPONSE_METHODS.has(method)) {
-      throw new Error(
-        `Unsupported codex_respond method: ${method}. The pending request was not consumed and no response was sent.`,
-      );
-    }
     onlyKeys(args, [
       "request_id",
       "thread_id",
@@ -867,6 +861,10 @@ export class ControlSurface {
     const requestId = requestIdValue as RpcId;
     const threadId = requiredString(args, "thread_id", 200);
     const turnId = optionalString(args, "turn_id", 200);
+    const method = requiredString(args, "method", 300);
+    if (!SUPPORTED_RESPOND_METHODS.has(method)) {
+      throw new Error(`Unsupported app-server request method: ${method}; pending request remains observable`);
+    }
     const decision = enumValue(args, "decision", ["accept", "acceptForSession", "decline", "cancel"] as const);
     const amendment = args.execpolicy_amendment;
     const answers = args.answers;
@@ -924,7 +922,10 @@ export class ControlSurface {
     } else if (method === "item/tool/requestUserInput") {
       response = answers !== undefined ? { answers: asObject(answers, "answers") } : asObject(generic, "response");
     } else {
-      throw new Error(`Unsupported codex_respond method: ${method}`);
+      if (generic === undefined) {
+        throw new Error("This request method requires a generic response object");
+      }
+      response = asObject(generic, "response");
     }
 
     const pending = this.appServer.runtime.takePending(requestId, {

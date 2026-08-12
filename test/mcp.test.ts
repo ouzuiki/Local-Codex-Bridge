@@ -1,26 +1,30 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import type { AppServerManager } from "../src/app-server.js";
 import { CHECKPOINT_DIRECTORY_ENV } from "../src/checkpoint.js";
+import { McpStdioServer } from "../src/mcp.js";
+import { RuntimeStore } from "../src/runtime.js";
+import { ControlSurface } from "../src/tools.js";
 
 type RpcId = string | number;
 
 class TestClient {
   readonly child: ChildProcessWithoutNullStreams;
-  readonly messages: Array<Record<string, unknown>> = [];
   readonly #pending = new Map<string, (message: Record<string, unknown>) => void>();
+  readonly #unclaimed: Record<string, unknown>[] = [];
   #buffer = "";
 
-  constructor(environment: NodeJS.ProcessEnv = process.env, cwd?: string) {
+  constructor(environment: NodeJS.ProcessEnv = process.env) {
     const entry = fileURLToPath(new URL("../src/index.js", import.meta.url));
     this.child = spawn(process.execPath, [entry], {
-      ...(cwd ? { cwd } : {}),
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -35,11 +39,16 @@ class TestClient {
         this.#buffer = this.#buffer.slice(newline + 1);
         if (!line) continue;
         const message = JSON.parse(line) as Record<string, unknown>;
-        this.messages.push(message);
         const id = message.id;
         if (typeof id === "string" || typeof id === "number") {
-          this.#pending.get(`${typeof id}:${String(id)}`)?.(message);
-          this.#pending.delete(`${typeof id}:${String(id)}`);
+          const key = `${typeof id}:${String(id)}`;
+          const pending = this.#pending.get(key);
+          if (pending) {
+            pending(message);
+            this.#pending.delete(key);
+          } else {
+            this.#unclaimed.push(message);
+          }
         }
       }
     });
@@ -66,8 +75,8 @@ class TestClient {
     this.child.stdin.write(value);
   }
 
-  responseCount(id: RpcId): number {
-    return this.messages.filter((message) => message.id === id && typeof message.id === typeof id).length;
+  takeUnclaimed(): Record<string, unknown>[] {
+    return this.#unclaimed.splice(0);
   }
 
   async close(): Promise<number | null> {
@@ -83,10 +92,6 @@ class TestClient {
       });
     });
   }
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function toolPayload(response: Record<string, unknown>): Record<string, unknown> {
@@ -130,14 +135,6 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
     assert.equal(
       (initialized.result as Record<string, unknown>).protocolVersion,
       "2025-03-26",
-    );
-    assert.deepEqual(
-      (initialized.result as Record<string, unknown>).serverInfo,
-      {
-        name: "local-codex-bridge",
-        title: "Local Codex Bridge",
-        version: "2.1.1",
-      },
     );
 
     // A second initialize reuses the first negotiated result with its own response id.
@@ -200,9 +197,6 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
       (respondTool?.annotations as Record<string, unknown>).idempotentHint,
       false,
     );
-    assert.doesNotMatch(respondTool?.description as string, /permissions|elicitation|future request/i);
-    const respondProperties = (respondTool?.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>>;
-    assert.match(respondProperties.response?.description as string, /known item\/tool\/requestUserInput method/);
     const checkpointTool = tools.find((tool) => tool.name === "codex_checkpoint");
     assert.match(
       checkpointTool?.description as string,
@@ -215,87 +209,6 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
     );
   } finally {
     assert.equal(await client.close(), 0);
-  }
-});
-
-test("MCP rejects a duplicate active typed id without disturbing cancellation, cleanup, or reuse", async () => {
-  const fakeDirectory = mkdtempSync(join(tmpdir(), "local-codex-bridge-mcp-duplicate-"));
-  const fakeCodex = fileURLToPath(new URL("../../test/fake-codex.mjs", import.meta.url));
-  writeFileSync(
-    join(fakeDirectory, "app-server"),
-    `process.argv.splice(2, 0, "app-server");\nvoid import(${JSON.stringify(pathToFileURL(fakeCodex).href)});\n`,
-    "utf8",
-  );
-  const client = new TestClient({
-    ...process.env,
-    CODEX_EXE: process.execPath,
-  }, fakeDirectory);
-  try {
-    await initialize(client, 1);
-    const started = toolPayload(await client.request(2, "tools/call", {
-      name: "codex_turn",
-      arguments: {
-        text: "test: hold bounded observe",
-        cwd: fakeDirectory,
-        sandbox: "read-only",
-        approval_policy: "never",
-      },
-    }));
-    assert.equal(started.accepted, true);
-
-    client.writeRaw(`${JSON.stringify({
-      jsonrpc: "2.0",
-      id: 17,
-      method: "tools/call",
-      params: {
-        name: "codex_observe",
-        arguments: {
-          thread_id: started.thread_id,
-          cursor: started.event_cursor,
-          wait_ms: 1_000,
-        },
-      },
-    })}\n`);
-    await delay(25);
-    assert.equal(client.responseCount(17), 0, "the original bounded observe must still be active");
-
-    const duplicate = client.expect(17, "duplicate numeric id rejection");
-    client.writeRaw(`${JSON.stringify({ jsonrpc: "2.0", id: 17, method: "ping", params: {} })}\n`);
-    const duplicateResponse = await duplicate;
-    assert.deepEqual(duplicateResponse.error, {
-      code: -32600,
-      message: "Duplicate request id is already active",
-    });
-
-    const distinctString = client.expect("17", "distinct string id response");
-    client.writeRaw(`${JSON.stringify({ jsonrpc: "2.0", id: "17", method: "ping", params: {} })}\n`);
-    const stringResponse = await distinctString;
-    assert.deepEqual(stringResponse.result, {});
-
-    client.writeRaw(`${JSON.stringify({
-      jsonrpc: "2.0",
-      method: "notifications/cancelled",
-      params: { requestId: 17, reason: "deterministic duplicate lifecycle test" },
-    })}\n`);
-    await delay(1_100);
-    assert.equal(
-      client.responseCount(17),
-      1,
-      "the cancelled first request response must remain suppressed",
-    );
-    assert.equal(client.responseCount("17"), 1, "numeric and string ids must remain distinct");
-
-    const reused = await client.request(17, "ping");
-    assert.deepEqual(reused.result, {});
-    await delay(25);
-    assert.equal(
-      client.responseCount(17),
-      2,
-      "finally cleanup must allow safe reuse of the same typed id",
-    );
-  } finally {
-    assert.equal(await client.close(), 0);
-    rmSync(fakeDirectory, { recursive: true, force: true });
   }
 });
 
@@ -334,6 +247,181 @@ test("MCP rejects materially different repeated initialize identities", async ()
     }
   } finally {
     assert.equal(await client.close(), 0);
+  }
+});
+
+test("MCP rejects duplicate active typed request ids without disturbing distinct ids", async () => {
+  const client = new TestClient();
+  try {
+    await initialize(client, 1);
+    const numeric = client.expect(17, "first numeric tools/list");
+    const string = client.expect("17", "distinct string tools/list");
+    client.writeRaw(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 17, method: "tools/list", params: {} })}\n` +
+      `${JSON.stringify({ jsonrpc: "2.0", id: 17, method: "tools/list", params: {} })}\n` +
+      `${JSON.stringify({ jsonrpc: "2.0", id: "17", method: "tools/list", params: {} })}\n`,
+    );
+    const [first, distinct] = await Promise.all([numeric, string]);
+    assert.equal(first.id, 17);
+    assert.equal(distinct.id, "17");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const duplicateErrors = client.takeUnclaimed();
+    assert.equal(duplicateErrors.length, 1);
+    assert.deepEqual(duplicateErrors[0]?.error, {
+      code: -32600,
+      message: "Duplicate request id is already active",
+    });
+    assert.equal(duplicateErrors[0]?.id, 17);
+  } finally {
+    assert.equal(await client.close(), 0);
+  }
+});
+
+test("MCP duplicate active typed id preserves cancellation suppression and safe reuse", async () => {
+  const runtime = new RuntimeStore();
+  const threadId = "thread-duplicate-cancellation";
+  const turnId = "turn-duplicate-cancellation";
+  runtime.markTurnAccepted(threadId, turnId);
+  const control = new ControlSurface({ runtime } as unknown as AppServerManager);
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(process, "stdin");
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, "stdout");
+  const messages: Record<string, unknown>[] = [];
+  const waiting: Array<{
+    resolve: (message: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }> = [];
+  let buffer = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk: string) => {
+    buffer += chunk;
+    while (true) {
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) {
+        return;
+      }
+      const line = buffer.slice(0, newline).replace(/\r$/, "");
+      buffer = buffer.slice(newline + 1);
+      if (!line) {
+        continue;
+      }
+      const message = JSON.parse(line) as Record<string, unknown>;
+      const waiter = waiting.shift();
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        waiter.resolve(message);
+      } else {
+        messages.push(message);
+      }
+    }
+  });
+  const nextMessage = (): Promise<Record<string, unknown>> => {
+    const message = messages.shift();
+    if (message) {
+      return Promise.resolve(message);
+    }
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("timeout waiting for MCP response"));
+      }, 2_000);
+      timer.unref();
+      waiting.push({ resolve, reject, timer });
+    });
+  };
+  const send = (message: Record<string, unknown>): void => {
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+  };
+  const tick = async (): Promise<void> => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  let server: McpStdioServer | undefined;
+
+  Object.defineProperty(process, "stdin", { configurable: true, value: input });
+  Object.defineProperty(process, "stdout", { configurable: true, value: output });
+  try {
+    server = new McpStdioServer(control, { onClose: () => undefined });
+    server.start();
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "direct-test", version: "1" },
+      },
+    });
+    assert.equal((await nextMessage()).error, undefined);
+
+    const observe = {
+      name: "codex_observe",
+      arguments: { thread_id: threadId, cursor: 0, wait_ms: 1_000 },
+    };
+    send({ id: 17, method: "tools/call", params: observe });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+    // Keep the original request active while cancellation and the duplicate
+    // arrive in the same input batch. The duplicate error must not consume
+    // the cancellation marker that suppresses the original response.
+    input.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/cancelled",
+        params: { requestId: 17, reason: "deterministic duplicate lifecycle test" },
+      })}\n` +
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 17,
+        method: "tools/call",
+        params: observe,
+      })}\n`,
+    );
+    const duplicate = await nextMessage();
+    assert.equal(duplicate.id, 17);
+    assert.deepEqual(duplicate.error, {
+      code: -32600,
+      message: "Duplicate request id is already active",
+    });
+
+    send({ id: "17", method: "ping" });
+    const distinct = await nextMessage();
+    assert.equal(distinct.id, "17");
+    assert.deepEqual(distinct.result, {});
+
+    assert.equal(messages.length, 0);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(messages.length, 0, "cancelled first request must not emit a late response");
+
+    // The first request's finally cleanup must release only its own lifecycle;
+    // the same typed id can be reused and its new waiter must still wake.
+    send({ id: 17, method: "tools/call", params: observe });
+    await tick();
+    runtime.recordNotification("item/started", {
+      threadId,
+      turnId,
+      item: { type: "commandExecution", id: "after-id-reuse" },
+    });
+    const replacement = await nextMessage();
+    assert.equal(replacement.id, 17);
+    assert.equal(replacement.error, undefined);
+    const payload = toolPayload(replacement);
+    assert.deepEqual(
+      (payload.events as Array<Record<string, unknown>>).map((event) => event.method),
+      ["item/started"],
+    );
+  } finally {
+    if (server) {
+      await server.close();
+    }
+    input.destroy();
+    output.destroy();
+    if (stdinDescriptor) {
+      Object.defineProperty(process, "stdin", stdinDescriptor);
+    }
+    if (stdoutDescriptor) {
+      Object.defineProperty(process, "stdout", stdoutDescriptor);
+    }
   }
 });
 

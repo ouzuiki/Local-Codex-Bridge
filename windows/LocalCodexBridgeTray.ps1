@@ -1,12 +1,23 @@
 param(
-    [string]$ReadyUrl = $env:LOCAL_CODEX_BRIDGE_READY_URL,
-    [string]$ProfileName = $env:LOCAL_CODEX_BRIDGE_TUNNEL_PROFILE,
-    [string]$TunnelExecutable = $env:LOCAL_CODEX_BRIDGE_TUNNEL_EXE,
-    [string]$ProjectionPath = $env:LOCAL_CODEX_BRIDGE_PROJECTION_PATH
+    [string]$ReadyUrl,
+    [string]$ProfileName,
+    [string]$TunnelExecutable,
+    [string]$ProjectionPath,
+    [string]$CheckpointDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Import-Module (Join-Path $PSScriptRoot 'TrayCore.psm1') -Force
+
+$settings = Resolve-LocalCodexBridgeSettings
+if ([string]::IsNullOrWhiteSpace($ReadyUrl)) { $ReadyUrl = $settings.ReadyUrl }
+if ([string]::IsNullOrWhiteSpace($ProfileName)) { $ProfileName = $settings.ProfileName }
+if ([string]::IsNullOrWhiteSpace($TunnelExecutable)) { $TunnelExecutable = $settings.TunnelExecutable }
+if ([string]::IsNullOrWhiteSpace($ProjectionPath)) { $ProjectionPath = $settings.ProjectionPath }
+if ([string]::IsNullOrWhiteSpace($CheckpointDirectory)) { $CheckpointDirectory = $settings.CheckpointDirectory }
 
 $readyUri = $null
 if (
@@ -22,19 +33,12 @@ if ([string]::IsNullOrWhiteSpace($ProfileName) -or $ProfileName -notmatch '^[A-Z
 if ([string]::IsNullOrWhiteSpace($TunnelExecutable) -or -not [IO.Path]::IsPathRooted($TunnelExecutable)) {
     throw 'TunnelExecutable is required and must be an absolute path. Use -TunnelExecutable or LOCAL_CODEX_BRIDGE_TUNNEL_EXE.'
 }
-if ([string]::IsNullOrWhiteSpace($ProjectionPath)) {
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        throw 'ProjectionPath is required when LOCALAPPDATA is unavailable.'
-    }
-    $ProjectionPath = Join-Path $env:LOCALAPPDATA 'LocalCodexBridge\ux-projection.json'
+if ([string]::IsNullOrWhiteSpace($ProjectionPath) -or -not [IO.Path]::IsPathRooted($ProjectionPath)) {
+    throw 'ProjectionPath is required and must be absolute. Use -ProjectionPath or LOCAL_CODEX_BRIDGE_PROJECTION_PATH.'
 }
-if (-not [IO.Path]::IsPathRooted($ProjectionPath)) {
-    throw 'ProjectionPath must be absolute.'
+if (-not [string]::IsNullOrWhiteSpace($CheckpointDirectory) -and -not [IO.Path]::IsPathRooted($CheckpointDirectory)) {
+    throw 'CheckpointDirectory must be absolute when configured. Use LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR.'
 }
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-Import-Module (Join-Path $PSScriptRoot 'TrayCore.psm1') -Force
 
 $script:Ownership = $null
 $script:Cursor = New-ProjectionCursor
@@ -212,6 +216,12 @@ function Start-FormalTunnel {
     $startInfo.CreateNoWindow = $true
     $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $startInfo.EnvironmentVariables['LOCAL_CODEX_BRIDGE_UX_PROJECTION'] = [IO.Path]::GetFullPath($ProjectionPath)
+    $startInfo.EnvironmentVariables['LUMEN_CODEX_V2_UX_PROJECTION'] = [IO.Path]::GetFullPath($ProjectionPath)
+    if (-not [string]::IsNullOrWhiteSpace($CheckpointDirectory)) {
+        $checkpointDirectoryPath = [IO.Path]::GetFullPath($CheckpointDirectory)
+        $startInfo.EnvironmentVariables['LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR'] = $checkpointDirectoryPath
+        $startInfo.EnvironmentVariables['LUMEN_CODEX_V2_CHECKPOINT_DIR'] = $checkpointDirectoryPath
+    }
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $startInfo
     if (-not $process.Start()) { Set-TrayStatus 'Tunnel launch failed' 'error'; return }
@@ -241,7 +251,7 @@ function Start-FormalTunnel {
 function Stop-OwnedTunnel {
     if ($null -eq $script:Ownership) {
         Set-TrayStatus 'Stop refused: Tunnel not owned' 'attention'
-        Show-Notice 'Stop refused' 'This live Tray instance does not own the configured Tunnel.'
+        Show-Notice 'Stop refused' 'This live Tray instance does not own the formal Tunnel.'
         return
     }
     try {
@@ -276,7 +286,7 @@ $notifyIcon.Text = 'Local Codex Bridge'
 $menu = New-Object Windows.Forms.ContextMenuStrip
 $statusItem = $menu.Items.Add('Status: starting')
 $statusItem.Enabled = $false
-$menu.Items.Add('Start configured Tunnel', $null, { Start-FormalTunnel }) | Out-Null
+$menu.Items.Add('Start formal Tunnel', $null, { Start-FormalTunnel }) | Out-Null
 $menu.Items.Add('Stop owned Tunnel', $null, { Stop-OwnedTunnel }) | Out-Null
 $menu.Items.Add('-') | Out-Null
 $menu.Items.Add('Exit Tray', $null, {

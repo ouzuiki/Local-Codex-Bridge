@@ -7,6 +7,8 @@ import { RuntimeStore } from "../src/runtime.js";
 import {
   AtomicUxProjection,
   createUxProjectionFromEnvironment,
+  LEGACY_UX_PROJECTION_ENV,
+  UX_PROJECTION_ENV,
   type UxProjectionDocument,
 } from "../src/ux-projection.js";
 
@@ -22,6 +24,28 @@ test.beforeEach(() => {
 });
 
 test.after(() => rmSync(join(process.cwd(), "_test_tmp"), { recursive: true, force: true }));
+
+test("projection resolves canonical and legacy environment aliases deterministically", () => {
+  const canonicalPath = join(testRoot, "canonical.json");
+  const legacyPath = join(testRoot, "legacy.json");
+  const canonical = createUxProjectionFromEnvironment({ [UX_PROJECTION_ENV]: canonicalPath });
+  assert.ok(canonical instanceof AtomicUxProjection);
+  assert.equal((canonical as AtomicUxProjection).filePath, canonicalPath);
+  canonical?.close();
+
+  const legacy = createUxProjectionFromEnvironment({ [LEGACY_UX_PROJECTION_ENV]: legacyPath });
+  assert.ok(legacy instanceof AtomicUxProjection);
+  assert.equal((legacy as AtomicUxProjection).filePath, legacyPath);
+  legacy?.close();
+
+  const canonicalWins = createUxProjectionFromEnvironment({
+    [UX_PROJECTION_ENV]: canonicalPath,
+    [LEGACY_UX_PROJECTION_ENV]: legacyPath,
+  });
+  assert.ok(canonicalWins instanceof AtomicUxProjection);
+  assert.equal((canonicalWins as AtomicUxProjection).filePath, canonicalPath);
+  canonicalWins?.close();
+});
 
 test("projection is opt-in, atomic-shaped, bounded, monotonic, and content-free", () => {
   assert.equal(createUxProjectionFromEnvironment({}), undefined);

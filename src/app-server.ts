@@ -10,17 +10,17 @@ import {
 
 const MAX_JSONL_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-const MUTATING_ACKNOWLEDGEMENT_METHODS = new Set([
+const THREADLESS_REQUEST_ERROR = {
+  code: -32601,
+  message: "Unsupported app-server request without thread context",
+} as const;
+const MUTATING_REQUEST_METHODS = new Set([
   "thread/start",
   "thread/resume",
   "turn/start",
   "turn/steer",
   "turn/interrupt",
 ]);
-const THREADLESS_REQUEST_ERROR = {
-  code: -32601,
-  message: "Unsupported app-server request without thread context",
-} as const;
 
 interface PendingCall {
   method: string;
@@ -60,9 +60,9 @@ function messageFromUnknown(value: unknown): string {
 }
 
 function requestTimeoutError(method: string): Error {
-  if (MUTATING_ACKNOWLEDGEMENT_METHODS.has(method)) {
+  if (MUTATING_REQUEST_METHODS.has(method)) {
     return new Error(
-      `Codex app-server acknowledgement timed out after request was sent: ${method}. Operation outcome is UNKNOWN: Codex may already have accepted it. Re-observe or read before retrying; the Bridge will not automatically retry, cancel, or reconcile the operation.`,
+      `Codex app-server acknowledgement timed out for already-sent mutating request ${method}; operation outcome is UNKNOWN because Codex may already have accepted it. Re-observe or read before retrying. No automatic retry is performed.`,
     );
   }
   return new Error(`Codex app-server request timed out: ${method}`);

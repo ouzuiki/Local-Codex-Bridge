@@ -1,5 +1,74 @@
 Set-StrictMode -Version Latest
 
+function Resolve-LocalCodexBridgeSettings {
+    param(
+        [string]$SettingsPath = (Join-Path $PSScriptRoot 'local-settings.json'),
+        [hashtable]$Environment = $null
+    )
+
+    $settings = $null
+    if (Test-Path -LiteralPath $SettingsPath -PathType Leaf) {
+        try {
+            $settings = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        } catch {
+            throw "Local settings file is not valid JSON: $SettingsPath"
+        }
+    }
+
+    $definitions = @(
+        [pscustomobject]@{ Key = 'ReadyUrl'; Json = 'readyUrl'; Names = @('LOCAL_CODEX_BRIDGE_READY_URL', 'LUMEN_CODEX_V2_READY_URL') },
+        [pscustomobject]@{ Key = 'ProfileName'; Json = 'tunnelProfile'; Names = @('LOCAL_CODEX_BRIDGE_TUNNEL_PROFILE', 'LUMEN_CODEX_V2_TUNNEL_PROFILE') },
+        [pscustomobject]@{ Key = 'TunnelExecutable'; Json = 'tunnelExecutable'; Names = @('LOCAL_CODEX_BRIDGE_TUNNEL_EXE', 'LUMEN_CODEX_V2_TUNNEL_EXE') },
+        [pscustomobject]@{ Key = 'ProjectionPath'; Json = 'projectionPath'; Names = @('LOCAL_CODEX_BRIDGE_PROJECTION_PATH', 'LOCAL_CODEX_BRIDGE_UX_PROJECTION', 'LUMEN_CODEX_V2_PROJECTION_PATH', 'LUMEN_CODEX_V2_UX_PROJECTION') },
+        [pscustomobject]@{ Key = 'CheckpointDirectory'; Json = 'checkpointDirectory'; Names = @('LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR', 'LUMEN_CODEX_V2_CHECKPOINT_DIR') }
+    )
+    $resolved = @{}
+    foreach ($definition in $definitions) {
+        $value = $null
+        foreach ($name in $definition.Names) {
+            if ($null -ne $Environment) {
+                if ($Environment.ContainsKey($name) -and -not [string]::IsNullOrWhiteSpace([string]$Environment[$name])) {
+                    $value = [string]$Environment[$name]
+                    break
+                }
+            } else {
+                $environmentValue = [Environment]::GetEnvironmentVariable($name, 'Process')
+                if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+                    $value = $environmentValue
+                    break
+                }
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($value) -and $null -ne $settings) {
+            $property = $settings.PSObject.Properties[$definition.Json]
+            if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+                $value = [string]$property.Value
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $resolved[$definition.Key] = [Environment]::ExpandEnvironmentVariables($value).Trim()
+        }
+    }
+
+    if (-not $resolved.ContainsKey('ProjectionPath')) {
+        $localAppData = if ($null -ne $Environment -and $Environment.ContainsKey('LOCALAPPDATA')) {
+            [string]$Environment['LOCALAPPDATA']
+        } else {
+            [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+        }
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            $resolved['ProjectionPath'] = Join-Path $localAppData 'LocalCodexBridge\ux-projection.json'
+        }
+    }
+    return [pscustomobject]@{
+        ReadyUrl = if ($resolved.ContainsKey('ReadyUrl')) { $resolved['ReadyUrl'] } else { $null }
+        ProfileName = if ($resolved.ContainsKey('ProfileName')) { $resolved['ProfileName'] } else { $null }
+        TunnelExecutable = if ($resolved.ContainsKey('TunnelExecutable')) { $resolved['TunnelExecutable'] } else { $null }
+        ProjectionPath = if ($resolved.ContainsKey('ProjectionPath')) { $resolved['ProjectionPath'] } else { $null }
+        CheckpointDirectory = if ($resolved.ContainsKey('CheckpointDirectory')) { $resolved['CheckpointDirectory'] } else { $null }
+    }
+}
+
 function New-ProjectionCursor {
     [pscustomobject]@{
         Generation = $null
@@ -68,19 +137,19 @@ function Resolve-TerminalNotice {
         'completed' {
             return [pscustomobject]@{
                 Title = 'Codex turn completed'
-            Text = 'A Codex turn completed successfully.'
+                Text = 'A Codex turn completed successfully.'
             }
         }
         'interrupted' {
             return [pscustomobject]@{
                 Title = 'Codex turn interrupted'
-            Text = 'A Codex turn was interrupted or cancelled.'
+                Text = 'A Codex turn was interrupted or cancelled.'
             }
         }
         default {
             return [pscustomobject]@{
                 Title = 'Codex turn failed'
-        Text = "A Codex turn failed or ended abnormally (status: $Status)."
+                Text = "A Codex turn failed or ended abnormally (status: $Status)."
             }
         }
     }
@@ -122,4 +191,4 @@ function Test-TunnelOwnershipEvidence {
     return $true
 }
 
-Export-ModuleMember -Function New-ProjectionCursor, Resolve-TrayIconState, Resolve-NotReadyBaseIconState, Select-NewProjectionSignals, Resolve-TerminalNotice, Test-TunnelOwnershipEvidence
+Export-ModuleMember -Function Resolve-LocalCodexBridgeSettings, New-ProjectionCursor, Resolve-TrayIconState, Resolve-NotReadyBaseIconState, Select-NewProjectionSignals, Resolve-TerminalNotice, Test-TunnelOwnershipEvidence

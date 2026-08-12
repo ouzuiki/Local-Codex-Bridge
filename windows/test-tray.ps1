@@ -7,6 +7,64 @@ function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
+$settingsRoot = Join-Path $env:TEMP ("local-codex-bridge-settings-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $settingsRoot | Out-Null
+$settingsPath = Join-Path $settingsRoot 'local-settings.json'
+$settingsJson = @'
+{
+  "readyUrl": "http://127.0.0.1:19001/readyz",
+  "tunnelProfile": "settings-profile",
+  "tunnelExecutable": "C:\\Example\\settings\\tunnel-client.exe",
+  "projectionPath": "C:\\Example\\settings\\projection.json",
+  "checkpointDirectory": "C:\\Example\\settings\\checkpoints"
+}
+'@
+Set-Content -LiteralPath $settingsPath -Value $settingsJson -Encoding UTF8
+try {
+    $legacySettings = Resolve-LocalCodexBridgeSettings -SettingsPath $settingsPath -Environment @{
+        LOCALAPPDATA = 'C:\Example\AppData\Local'
+        LUMEN_CODEX_V2_READY_URL = 'http://127.0.0.1:19002/readyz'
+        LUMEN_CODEX_V2_TUNNEL_PROFILE = 'legacy-profile'
+        LUMEN_CODEX_V2_TUNNEL_EXE = 'C:\Example\legacy\tunnel-client.exe'
+        LUMEN_CODEX_V2_UX_PROJECTION = 'C:\Example\legacy\projection.json'
+        LUMEN_CODEX_V2_CHECKPOINT_DIR = 'C:\Example\legacy\checkpoints'
+    }
+    Assert-True ($legacySettings.ReadyUrl -ceq 'http://127.0.0.1:19002/readyz') 'Legacy ready URL must be supported.'
+    Assert-True ($legacySettings.ProfileName -ceq 'legacy-profile') 'Legacy Tunnel profile must be supported.'
+    Assert-True ($legacySettings.TunnelExecutable -ceq 'C:\Example\legacy\tunnel-client.exe') 'Legacy Tunnel executable must be supported.'
+    Assert-True ($legacySettings.ProjectionPath -ceq 'C:\Example\legacy\projection.json') 'Legacy projection path must be supported.'
+    Assert-True ($legacySettings.CheckpointDirectory -ceq 'C:\Example\legacy\checkpoints') 'Legacy checkpoint path must be supported.'
+
+    $genericSettings = Resolve-LocalCodexBridgeSettings -SettingsPath $settingsPath -Environment @{
+        LOCALAPPDATA = 'C:\Example\AppData\Local'
+        LOCAL_CODEX_BRIDGE_READY_URL = 'http://127.0.0.1:19003/readyz'
+        LOCAL_CODEX_BRIDGE_TUNNEL_PROFILE = 'generic-profile'
+        LOCAL_CODEX_BRIDGE_TUNNEL_EXE = 'C:\Example\generic\tunnel-client.exe'
+        LOCAL_CODEX_BRIDGE_PROJECTION_PATH = 'C:\Example\generic\projection.json'
+        LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR = 'C:\Example\generic\checkpoints'
+        LUMEN_CODEX_V2_READY_URL = 'http://127.0.0.1:19004/readyz'
+        LUMEN_CODEX_V2_TUNNEL_PROFILE = 'ignored-legacy-profile'
+    }
+    Assert-True ($genericSettings.ReadyUrl -ceq 'http://127.0.0.1:19003/readyz') 'Generic ready URL must override legacy settings.'
+    Assert-True ($genericSettings.ProfileName -ceq 'generic-profile') 'Generic Tunnel profile must override legacy settings.'
+    Assert-True ($genericSettings.TunnelExecutable -ceq 'C:\Example\generic\tunnel-client.exe') 'Generic Tunnel executable must override legacy settings.'
+    Assert-True ($genericSettings.ProjectionPath -ceq 'C:\Example\generic\projection.json') 'Generic projection path must override legacy settings.'
+    Assert-True ($genericSettings.CheckpointDirectory -ceq 'C:\Example\generic\checkpoints') 'Generic checkpoint path must override legacy settings.'
+
+    $settingsOnly = Resolve-LocalCodexBridgeSettings -SettingsPath $settingsPath -Environment @{
+        LOCALAPPDATA = 'C:\Example\AppData\Local'
+    }
+    Assert-True ($settingsOnly.ProfileName -ceq 'settings-profile') 'Local settings must be used when env is absent.'
+    Assert-True ($settingsOnly.ProjectionPath -ceq 'C:\Example\settings\projection.json') 'Local projection settings must be used when env is absent.'
+
+    $fallback = Resolve-LocalCodexBridgeSettings -SettingsPath (Join-Path $settingsRoot 'missing.json') -Environment @{
+        LOCALAPPDATA = 'C:\Example\AppData\Local'
+    }
+    Assert-True ($fallback.ProjectionPath -ceq 'C:\Example\AppData\Local\LocalCodexBridge\ux-projection.json') 'Canonical projection fallback must be deterministic.'
+} finally {
+    Remove-Item -LiteralPath $settingsRoot -Recurse -Force
+}
+
 foreach ($state in @('stopped', 'starting', 'ready', 'attention', 'error')) {
     Assert-True ((Resolve-TrayIconState $state 0) -ceq $state) "Zero waiting count must preserve icon state: $state"
 }
@@ -51,27 +109,29 @@ foreach ($state in @('stopped', 'starting', 'ready', 'attention', 'error')) {
 }
 
 $trayScriptPath = Join-Path $PSScriptRoot 'LocalCodexBridgeTray.ps1'
+$legacyTrayScriptPath = Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.ps1'
 $dailyLauncherPath = Join-Path $PSScriptRoot 'LocalCodexBridgeTray.vbs'
 $compatibilityLauncherPath = Join-Path $PSScriptRoot 'LocalCodexBridgeTray.cmd'
 $debugLauncherPath = Join-Path $PSScriptRoot 'LocalCodexBridgeTray.Debug.cmd'
-foreach ($scriptPath in @($trayScriptPath)) {
+foreach ($scriptPath in @($trayScriptPath, $legacyTrayScriptPath)) {
     $tokens = $null
     $parseErrors = $null
     $null = [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
     Assert-True ($parseErrors.Count -eq 0) "PowerShell Tray script must parse: $scriptPath"
 }
-$traySource = Get-Content -LiteralPath $trayScriptPath -Raw -Encoding UTF8
+$canonicalTraySource = Get-Content -LiteralPath $trayScriptPath -Raw -Encoding UTF8
+$legacyTraySource = Get-Content -LiteralPath $legacyTrayScriptPath -Raw -Encoding UTF8
+$traySource = $canonicalTraySource
+Assert-True ($canonicalTraySource -notmatch 'LumenCodexControlV2Tray\.(?:ps1|vbs|cmd)') 'Canonical Tray implementation must not depend on legacy launcher files.'
+Assert-True ($canonicalTraySource -match 'TrayCore\.psm1') 'Canonical Tray implementation must use the shared canonical Tray core.'
+Assert-True ($canonicalTraySource -match '\$startInfo\.EnvironmentVariables\[''LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR''\]\s*=\s*\$checkpointDirectoryPath') 'Canonical Tray must pass the resolved checkpoint directory through the canonical environment.'
+Assert-True ($canonicalTraySource -match '\$startInfo\.EnvironmentVariables\[''LUMEN_CODEX_V2_CHECKPOINT_DIR''\]\s*=\s*\$checkpointDirectoryPath') 'Canonical Tray must pass the resolved checkpoint directory through the legacy environment alias.'
+Assert-True ($legacyTraySource -match 'LocalCodexBridgeTray\.ps1') 'Legacy PowerShell Tray entry must forward to the canonical implementation.'
+Assert-True ($legacyTraySource -notmatch 'Add-Type|Resolve-LocalCodexBridgeSettings|Windows\.Forms') 'Legacy PowerShell Tray entry must remain a thin shim.'
 Assert-True ($traySource -notmatch '\$notifyIcon\.Icon\s*=\s*\[Drawing\.SystemIcons\]::Application') 'Tray must not assign the generic Application icon directly.'
 foreach ($state in @('stopped', 'starting', 'ready', 'attention', 'error')) {
     Assert-True ($traySource.Contains("$state.ico")) "Tray must reference its state icon: $state"
 }
-Assert-True ($traySource -match '\$env:LOCAL_CODEX_BRIDGE_READY_URL') 'Tray ReadyUrl must come from an explicit parameter or public environment variable.'
-Assert-True ($traySource -match '\$env:LOCAL_CODEX_BRIDGE_TUNNEL_PROFILE') 'Tray profile must come from an explicit parameter or public environment variable.'
-Assert-True ($traySource -match '\$env:LOCAL_CODEX_BRIDGE_TUNNEL_EXE') 'Tray executable must come from an explicit parameter or public environment variable.'
-Assert-True ($traySource -notmatch '\[string\]\$ReadyUrl\s*=\s*''http') 'Tray must not bake in a readiness URL.'
-Assert-True ($traySource -notmatch '\[string\]\$ProfileName\s*=\s*''') 'Tray must not bake in a Tunnel profile.'
-Assert-True ($traySource -notmatch '\[string\]\$TunnelExecutable\s*=\s*"') 'Tray must not bake in a Tunnel executable path.'
-Assert-True ($traySource.Contains('$notifyIcon.Text = ''Local Codex Bridge''')) 'Tray must expose the public product name.'
 Assert-True (Test-Path -LiteralPath $dailyLauncherPath -PathType Leaf) 'Daily WScript launcher must exist.'
 $dailyLauncherSource = Get-Content -LiteralPath $dailyLauncherPath -Raw -Encoding ASCII
 Assert-True ($dailyLauncherSource -match '(?i)CreateObject\("WScript\.Shell"\)') 'Daily launcher must use the windowless WScript host.'
@@ -79,14 +139,30 @@ Assert-True ($dailyLauncherSource -match '(?i)System32\\WindowsPowerShell\\v1\.0
 Assert-True ($dailyLauncherSource -match '(?i)-WindowStyle\s+Hidden') 'Daily launcher must hide its PowerShell child.'
 Assert-True ($dailyLauncherSource -match '(?i)shell\.Run\s+command\s*,\s*0\s*,\s*False') 'Daily launcher must request a hidden non-blocking window.'
 Assert-True ($dailyLauncherSource -notmatch '(?i)cmd\.exe|\.cmd') 'Daily launcher must not traverse a console batch host.'
-Assert-True ($dailyLauncherSource -match '(?i)WScript\.Arguments') 'Daily launcher must forward explicit Tray parameters.'
 $compatibilityLauncherSource = Get-Content -LiteralPath $compatibilityLauncherPath -Raw -Encoding ASCII
 Assert-True ($compatibilityLauncherSource -notmatch '(?i)(?:^|\s)/min(?:\s|$)') 'Compatibility launcher must not retain the old minimized mode.'
-Assert-True ($compatibilityLauncherSource -match '%\*') 'Compatibility launcher must forward explicit Tray parameters.'
+Assert-True ($compatibilityLauncherSource -match '(?i)-WindowStyle\s+Hidden') 'Normal canonical launcher must remain hidden.'
+Assert-True ($compatibilityLauncherSource -match '(?i)LocalCodexBridgeTray\.ps1') 'Normal canonical launcher must invoke the canonical implementation.'
+Assert-True ($compatibilityLauncherSource -notmatch '(?i)LocalCodexBridgeTray\.Debug\.cmd') 'Normal canonical launcher must not invoke Debug.'
 Assert-True (Test-Path -LiteralPath $debugLauncherPath -PathType Leaf) 'Debug launcher must exist.'
 $debugLauncherSource = Get-Content -LiteralPath $debugLauncherPath -Raw -Encoding ASCII
 Assert-True ($debugLauncherSource -match '(?i)-NoExit') 'Debug launcher must keep its console available.'
 Assert-True ($debugLauncherSource -notmatch '(?i)-WindowStyle\s+Hidden') 'Debug launcher must keep its console visible.'
+$legacyDailyLauncherSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.vbs') -Raw -Encoding ASCII
+$legacyCompatibilityLauncherSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.cmd') -Raw -Encoding ASCII
+$legacyDebugLauncherSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.Debug.cmd') -Raw -Encoding ASCII
+Assert-True ($legacyDailyLauncherSource -match '(?i)LocalCodexBridgeTray\.vbs') 'Legacy WScript launcher must forward to the canonical WScript launcher.'
+Assert-True ($legacyDailyLauncherSource -notmatch '(?i)LumenCodexControlV2Tray\.ps1') 'Legacy WScript launcher must not target a legacy implementation.'
+Assert-True ($legacyCompatibilityLauncherSource -match '(?i)LocalCodexBridgeTray\.cmd') 'Legacy normal launcher must forward to the canonical normal launcher.'
+Assert-True ($legacyDebugLauncherSource -match '(?i)LocalCodexBridgeTray\.Debug\.cmd') 'Legacy Debug launcher must forward to the canonical Debug launcher.'
+foreach ($legacyPath in @(
+    (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.ps1'),
+    (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.vbs'),
+    (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.cmd'),
+    (Join-Path $PSScriptRoot 'LumenCodexControlV2Tray.Debug.cmd')
+)) {
+    Assert-True (Test-Path -LiteralPath $legacyPath -PathType Leaf) "Legacy Tray entry must remain available: $legacyPath"
+}
 
 $cursor = New-ProjectionCursor
 $oldProjection = [pscustomobject]@{
@@ -144,19 +220,19 @@ $fakeProcess = [pscustomobject]@{ Id = 4242; HasExited = $false }
 $ownership = [pscustomobject]@{
     Process = $fakeProcess
     ProcessId = 4242
-    ExecutablePath = 'C:\Tools\tunnel-client.exe'
+    ExecutablePath = 'C:\Example\tunnel-client.exe'
     StartTimeUtcTicks = 123456789L
-    LaunchCommandLine = '"C:\Tools\tunnel-client.exe" run --profile public-example-profile --pid.file "C:\run\unique.pid"'
-    ProfileName = 'public-example-profile'
-    PidFilePath = 'C:\run\unique.pid'
+    LaunchCommandLine = '"C:\Example\tunnel-client.exe" run --profile example-profile --pid.file "C:\Example\run\unique.pid"'
+    ProfileName = 'example-profile'
+    PidFilePath = 'C:\Example\run\unique.pid'
 }
 $observation = [pscustomobject]@{
     ProcessId = 4242
-    ExecutablePath = 'C:\Tools\tunnel-client.exe'
+    ExecutablePath = 'C:\Example\tunnel-client.exe'
     StartTimeUtcTicks = 123456789L
     CommandLine = $ownership.LaunchCommandLine
-    ProfileName = 'public-example-profile'
-    PidFilePath = 'C:\run\unique.pid'
+    ProfileName = 'example-profile'
+    PidFilePath = 'C:\Example\run\unique.pid'
 }
 Assert-True (Test-TunnelOwnershipEvidence $ownership $observation 4242) 'Matching strong ownership evidence must pass.'
 foreach ($property in @('ProcessId', 'ExecutablePath', 'StartTimeUtcTicks', 'CommandLine', 'ProfileName', 'PidFilePath')) {
@@ -167,7 +243,7 @@ foreach ($property in @('ProcessId', 'ExecutablePath', 'StartTimeUtcTicks', 'Com
         'StartTimeUtcTicks' { $changed.StartTimeUtcTicks = 987654321L }
         'CommandLine' { $changed.CommandLine = $changed.CommandLine + ' --different' }
         'ProfileName' { $changed.ProfileName = 'different-profile' }
-        'PidFilePath' { $changed.PidFilePath = 'C:\run\different.pid' }
+        'PidFilePath' { $changed.PidFilePath = 'C:\Example\run\different.pid' }
     }
     Assert-True (-not (Test-TunnelOwnershipEvidence $ownership $changed 4242)) "Ownership mismatch must fail: $property"
 }

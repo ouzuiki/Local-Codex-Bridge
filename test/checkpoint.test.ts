@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   readFileSync,
   readdirSync,
+  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -12,7 +13,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AppServerManager } from "../src/app-server.js";
-import { CheckpointStore } from "../src/checkpoint.js";
+import {
+  CHECKPOINT_DIRECTORY_ENV,
+  CheckpointStore,
+  LEGACY_CHECKPOINT_DIRECTORY_ENV,
+  resolveCheckpointDirectory,
+} from "../src/checkpoint.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 
 const unavailableAppServer = {} as unknown as AppServerManager;
@@ -66,6 +72,38 @@ test("checkpoint is the sole addition to the existing tool catalog", () => {
     steer?.description ?? "",
     /steer only for a semantic redirect or correction based on new evidence or changed user intent/,
   );
+});
+
+test("checkpoint directory resolution preserves legacy data and honors canonical aliases", () => {
+  const base = mkdtempSync(join(tmpdir(), "local-codex-bridge-checkpoint-config-test-"));
+  const legacyDefault = join(base, "Lumen", "CodexControlV2", "checkpoints");
+  const canonicalDefault = join(base, "LocalCodexBridge", "checkpoints");
+
+  try {
+    assert.equal(resolveCheckpointDirectory({ LOCALAPPDATA: base }), canonicalDefault);
+    mkdirSync(legacyDefault, { recursive: true });
+    assert.equal(resolveCheckpointDirectory({ LOCALAPPDATA: base }), legacyDefault);
+
+    const explicitCanonical = join(base, "explicit-canonical");
+    const explicitLegacy = join(base, "explicit-legacy");
+    assert.equal(
+      resolveCheckpointDirectory({
+        LOCALAPPDATA: base,
+        [CHECKPOINT_DIRECTORY_ENV]: explicitCanonical,
+        [LEGACY_CHECKPOINT_DIRECTORY_ENV]: explicitLegacy,
+      }),
+      explicitCanonical,
+    );
+    assert.equal(
+      resolveCheckpointDirectory({
+        LOCALAPPDATA: base,
+        [LEGACY_CHECKPOINT_DIRECTORY_ENV]: explicitLegacy,
+      }),
+      explicitLegacy,
+    );
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("checkpoint keeps immutable original plus only previous/current across store instances", async () => {
