@@ -7,11 +7,15 @@ import {
   sanitizeForTransport,
   type RpcId,
 } from "./runtime.js";
+import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
 
 const MAX_JSONL_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_LATE_RESPONSE_TTL_MS = 60_000;
 const DEFAULT_LATE_RESPONSE_LIMIT = 256;
+const GRACEFUL_CLOSE_TIMEOUT_MS = 1_500;
+const SOFT_TERMINATE_TIMEOUT_MS = 1_000;
+const HARD_TERMINATE_TIMEOUT_MS = 1_000;
 const MAX_SCOPE_ID_CHARS = 200;
 const THREADLESS_REQUEST_ERROR = {
   code: -32601,
@@ -51,10 +55,24 @@ interface RetainedLateResponse {
 export interface AppServerLaunchOptions {
   executable?: string;
   prefixArgs?: readonly string[];
+  environment?: NodeJS.ProcessEnv;
+  platformPolicy?: PlatformPolicy;
   requestTimeoutMs?: number;
   lateResponseTtlMs?: number;
   lateResponseLimit?: number;
 }
+
+export interface ChildTerminationTimeouts {
+  readonly gracefulMs: number;
+  readonly softMs: number;
+  readonly hardMs: number;
+}
+
+const DEFAULT_CHILD_TERMINATION_TIMEOUTS: ChildTerminationTimeouts = {
+  gracefulMs: GRACEFUL_CLOSE_TIMEOUT_MS,
+  softMs: SOFT_TERMINATE_TIMEOUT_MS,
+  hardMs: HARD_TERMINATE_TIMEOUT_MS,
+};
 
 function rpcKey(id: RpcId): string {
   return `${typeof id}:${String(id)}`;
@@ -146,11 +164,20 @@ export function resolveCodexExecutable(
   return "codex";
 }
 
+export function resolveCodexChildEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const childEnvironment = { ...environment };
+  delete childEnvironment.CONTROL_PLANE_API_KEY;
+  return childEnvironment;
+}
+
 async function waitForExit(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number,
+  platformPolicy: PlatformPolicy,
 ): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) {
+  if (platformPolicy.hasChildExited(child)) {
     return true;
   }
   return await new Promise<boolean>((resolve) => {
@@ -168,6 +195,55 @@ async function waitForExit(
     const timer = setTimeout(() => finish(false), timeoutMs);
     child.once("exit", onExit);
   });
+}
+
+export async function terminateAppServerChild(
+  child: ChildProcessWithoutNullStreams,
+  platformPolicy: PlatformPolicy,
+  timeouts: ChildTerminationTimeouts = DEFAULT_CHILD_TERMINATION_TIMEOUTS,
+): Promise<void> {
+  if (platformPolicy.hasChildExited(child)) {
+    return;
+  }
+
+  let terminationError: Error | undefined;
+  try {
+    child.stdin.end();
+  } catch (error) {
+    terminationError = error instanceof Error ? error : new Error(String(error));
+  }
+  if (await waitForExit(child, timeouts.gracefulMs, platformPolicy)) {
+    return;
+  }
+  if (platformPolicy.hasChildExited(child)) {
+    return;
+  }
+
+  try {
+    platformPolicy.softTerminateChild(child);
+  } catch (error) {
+    terminationError = error instanceof Error ? error : new Error(String(error));
+  }
+  if (await waitForExit(child, timeouts.softMs, platformPolicy)) {
+    return;
+  }
+  if (platformPolicy.hasChildExited(child)) {
+    return;
+  }
+
+  try {
+    platformPolicy.hardTerminateChild(child);
+  } catch (error) {
+    terminationError = error instanceof Error ? error : new Error(String(error));
+  }
+  if (await waitForExit(child, timeouts.hardMs, platformPolicy)) {
+    return;
+  }
+
+  const detail = terminationError ? `: ${terminationError.message}` : "";
+  throw new Error(
+    `Codex app-server did not exit after graceful, soft, and hard termination${detail}`,
+  );
 }
 
 export function writeWithBackpressure(
@@ -259,6 +335,8 @@ export class AppServerManager {
 
   readonly #executable: string;
   readonly #prefixArgs: readonly string[];
+  readonly #environment: NodeJS.ProcessEnv;
+  readonly #platformPolicy: PlatformPolicy;
   readonly #requestTimeoutMs: number;
   readonly #lateResponseTtlMs: number;
   readonly #lateResponseLimit: number;
@@ -267,6 +345,7 @@ export class AppServerManager {
   readonly #writeLine: (chunk: string) => Promise<void>;
 
   #child: ChildProcessWithoutNullStreams | null = null;
+  #childTerminationPromise: Promise<void> | null = null;
   #startPromise: Promise<void> | null = null;
   #closePromise: Promise<void> | null = null;
   #fatal: Error | null = null;
@@ -280,8 +359,11 @@ export class AppServerManager {
     options: AppServerLaunchOptions = {},
   ) {
     this.runtime = runtime;
-    this.#executable = options.executable ?? resolveCodexExecutable();
+    const sourceEnvironment = options.environment ?? process.env;
+    this.#platformPolicy = options.platformPolicy ?? platformPolicyFor();
+    this.#executable = options.executable ?? resolveCodexExecutable(sourceEnvironment);
     this.#prefixArgs = options.prefixArgs ?? [];
+    this.#environment = resolveCodexChildEnvironment(sourceEnvironment);
     this.#requestTimeoutMs =
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#lateResponseTtlMs = positiveIntegerOption(
@@ -353,9 +435,8 @@ export class AppServerManager {
         [...this.#prefixArgs, "app-server", "--listen", "stdio://"],
         {
           stdio: ["pipe", "pipe", "pipe"],
-          shell: false,
-          windowsHide: true,
-          env: process.env,
+          ...this.#platformPolicy.appServerSpawnOptions(),
+          env: this.#environment,
         },
       );
     } catch (error) {
@@ -395,7 +476,7 @@ export class AppServerManager {
           clientInfo: {
             name: "local-codex-bridge",
             title: "Local Codex Bridge",
-            version: "2.1.2",
+            version: "2.1.3",
           },
           capabilities: {
             experimentalApi: true,
@@ -413,11 +494,10 @@ export class AppServerManager {
         this.#fatal ??
         new Error(`Codex app-server initialization failed: ${redactText(messageFromUnknown(error))}`);
       this.#fatal = failure;
-      if (child.exitCode === null && child.signalCode === null) {
-        child.stdin.end();
-        if (!(await waitForExit(child, 500))) {
-          child.kill();
-        }
+      try {
+        await this.#terminateChild(child);
+      } catch (terminationError) {
+        failure.message += `; shutdown failed: ${messageFromUnknown(terminationError)}`;
       }
       throw failure;
     }
@@ -663,14 +743,10 @@ export class AppServerManager {
     this.runtime.markAppServerExited(this.#fatal.message);
     this.#rejectAll(this.#fatal);
     const child = this.#child;
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.stdin.end();
-      const timer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill();
-        }
-      }, 500);
-      timer.unref();
+    if (child && !this.#platformPolicy.hasChildExited(child)) {
+      void this.#terminateChild(child).catch(() => {
+        // The latched protocol failure remains authoritative; close() reuses and awaits this same bounded termination attempt.
+      });
     }
   }
 
@@ -734,6 +810,16 @@ export class AppServerManager {
     this.#lateResponses.clear();
   }
 
+  #terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (!this.#childTerminationPromise) {
+      this.#childTerminationPromise = terminateAppServerChild(
+        child,
+        this.#platformPolicy,
+      );
+    }
+    return this.#childTerminationPromise;
+  }
+
   async #close(): Promise<void> {
     this.#closing = true;
     const child = this.#child;
@@ -741,13 +827,7 @@ export class AppServerManager {
       return;
     }
     this.#rejectAll(new Error("Codex app-server manager is shutting down"));
-    if (child.exitCode === null && child.signalCode === null) {
-      child.stdin.end();
-      if (!(await waitForExit(child, 1_500))) {
-        child.kill();
-        await waitForExit(child, 1_000);
-      }
-    }
+    await this.#terminateChild(child);
     this.#child = null;
   }
 }

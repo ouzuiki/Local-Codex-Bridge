@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readSync,
@@ -10,7 +9,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
+
+import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
 
 export const CHECKPOINT_DIRECTORY_ENV = "LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR";
 export const LEGACY_CHECKPOINT_DIRECTORY_ENV = "LUMEN_CODEX_V2_CHECKPOINT_DIR";
@@ -167,34 +168,23 @@ function isMissingFile(error: unknown): boolean {
 
 export function resolveCheckpointDirectory(
   environment: NodeJS.ProcessEnv = process.env,
+  homeDirectory: string = homedir(),
+  platformPolicy: PlatformPolicy = platformPolicyFor(),
 ): string {
   const configured = environment[CHECKPOINT_DIRECTORY_ENV]?.trim();
   if (configured) {
-    if (!isAbsolute(configured)) {
-      throw new Error(`${CHECKPOINT_DIRECTORY_ENV} must be an absolute path`);
-    }
-    return resolve(configured);
+    return platformPolicy.normalizeExplicitCheckpointDirectory(configured);
   }
 
   const legacyConfigured = environment[LEGACY_CHECKPOINT_DIRECTORY_ENV]?.trim();
   if (legacyConfigured) {
-    if (!isAbsolute(legacyConfigured)) {
-      throw new Error(`${LEGACY_CHECKPOINT_DIRECTORY_ENV} must be an absolute path`);
-    }
-    return resolve(legacyConfigured);
+    return platformPolicy.normalizeExplicitCheckpointDirectory(legacyConfigured);
   }
 
-  const localAppData = environment.LOCALAPPDATA?.trim();
-  const userProfile = environment.USERPROFILE?.trim() || homedir();
-  const base = localAppData || join(userProfile, "AppData", "Local");
-  if (!isAbsolute(base)) {
-    throw new Error("Unable to resolve an absolute local app-data directory for checkpoints");
-  }
-  const legacyDefault = join(base, "Lumen", "CodexControlV2", "checkpoints");
-  if (existsSync(legacyDefault)) {
-    return legacyDefault;
-  }
-  return join(base, "LocalCodexBridge", "checkpoints");
+  return platformPolicy.resolveDefaultCheckpointDirectory(
+    environment,
+    homeDirectory,
+  );
 }
 
 export class CheckpointStore {

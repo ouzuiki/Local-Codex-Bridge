@@ -11,6 +11,7 @@ import {
   writeWithBackpressure,
 } from "../src/app-server.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
+import { WINDOWS_PLATFORM_POLICY } from "../src/platform.js";
 
 const fakeCodex = fileURLToPath(new URL("../../test/fake-codex.mjs", import.meta.url));
 const timeoutCodex = fileURLToPath(new URL("../../test/timeout-codex.mjs", import.meta.url));
@@ -64,7 +65,7 @@ test("control surface starts asynchronously, steers the same turn, uses raw requ
     prefixArgs: [fakeCodex],
     requestTimeoutMs: 2_000,
   });
-  const control = new ControlSurface(manager);
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   try {
     const started = await control.call("codex_turn", {
       text: "read only",
@@ -123,6 +124,27 @@ test("control surface starts asynchronously, steers the same turn, uses raw requ
   }
 });
 
+test("Codex child environment removes only the Tunnel control-plane secret", async () => {
+  const manager = new AppServerManager(undefined, {
+    executable: process.execPath,
+    prefixArgs: [fakeCodex],
+    environment: {
+      ...process.env,
+      CONTROL_PLANE_API_KEY: "synthetic-test-value",
+      LOCAL_CODEX_BRIDGE_ENV_PROBE: "preserved",
+    },
+    requestTimeoutMs: 2_000,
+  });
+  try {
+    assert.deepEqual(await manager.request("test/environment", {}), {
+      controlPlaneApiKeyPresent: false,
+      preservedProbe: "preserved",
+    });
+  } finally {
+    await manager.close();
+  }
+});
+
 test("unexpected app-server death is latched and never auto-restarted", async () => {
   const manager = new AppServerManager(undefined, {
     executable: process.execPath,
@@ -139,7 +161,7 @@ test("unexpected app-server death is latched and never auto-restarted", async ()
 
 test("failed app-server response write restores the original pending request", async () => {
   const manager = new RejectingResponseManager();
-  const control = new ControlSurface(manager);
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   manager.runtime.markTurnAccepted("thread-restore", "turn-restore");
   manager.runtime.recordServerRequest(41, "item/fileChange/requestApproval", {
     threadId: "thread-restore",
@@ -295,7 +317,7 @@ test("late thread/start and thread/resume become observable without a follow-on 
     prefixArgs: [lateResponseCodex, "120"],
     requestTimeoutMs: 30,
   });
-  const control = new ControlSurface(manager);
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   try {
     await assert.rejects(
       control.call("codex_turn", { text: "new thread", cwd: "D:\\Bridge" }),
@@ -482,7 +504,7 @@ test("duplicate app-server request ids fail the protocol without an ambiguous re
 
 test("unsupported pending app-server requests remain observable and are never answered", async () => {
   const manager = new RejectingResponseManager();
-  const control = new ControlSurface(manager);
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   manager.runtime.markTurnAccepted("thread-unknown", "turn-unknown");
   manager.runtime.recordServerRequest("future-1", "test/unknownServerRequest", {
     threadId: "thread-unknown",

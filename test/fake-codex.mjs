@@ -1,7 +1,21 @@
 import readline from "node:readline";
+import { writeFileSync } from "node:fs";
 
 if (process.argv.slice(2).join(" ") !== "app-server --listen stdio://") {
   process.exit(64);
+}
+
+if (process.env.LOCAL_CODEX_BRIDGE_FAKE_PID_FILE) {
+  writeFileSync(process.env.LOCAL_CODEX_BRIDGE_FAKE_PID_FILE, `${process.pid}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+if (process.env.LOCAL_CODEX_BRIDGE_FAKE_STUBBORN_SHUTDOWN === "1") {
+  process.on("SIGTERM", () => {
+    // Exercise platform escalation without affecting normal fixtures.
+  });
 }
 
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -100,6 +114,19 @@ lines.on("line", (line) => {
   if (message.method === "test/exit") {
     process.exit(23);
   }
+  if (message.method === "test/environment") {
+    send({
+      id: message.id,
+      result: {
+        controlPlaneApiKeyPresent: Object.hasOwn(
+          process.env,
+          "CONTROL_PLANE_API_KEY",
+        ),
+        preservedProbe: process.env.LOCAL_CODEX_BRIDGE_ENV_PROBE ?? null,
+      },
+    });
+    return;
+  }
   if (message.method === "test/threadless") {
     threadlessParentId = message.id;
     send({
@@ -128,4 +155,10 @@ lines.on("line", (line) => {
   }
 });
 
-lines.on("close", () => process.exit(0));
+lines.on("close", () => {
+  if (process.env.LOCAL_CODEX_BRIDGE_FAKE_STUBBORN_SHUTDOWN === "1") {
+    setInterval(() => undefined, 60_000);
+    return;
+  }
+  process.exit(0);
+});

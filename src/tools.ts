@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { AppServerManager } from "./app-server.js";
 import {
   CHECKPOINT_TEXT_LIMIT,
@@ -11,6 +9,7 @@ import {
   sanitizeForTransport,
   type RpcId,
 } from "./runtime.js";
+import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
 
 export interface ToolDefinition {
   name: string;
@@ -77,7 +76,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         cwd: {
           type: "string",
           maxLength: 1000,
-          description: "Optional exact absolute Windows drive-letter cwd filter for thread/list.",
+          description: "Optional exact absolute native cwd filter for thread/list.",
         },
         search_term: {
           type: "string",
@@ -132,7 +131,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         cwd: {
           type: "string",
           maxLength: 1000,
-          description: "Absolute Windows drive-letter cwd. Required for a new thread; optional override for resume.",
+          description: "Absolute native cwd. Required for a new thread; optional override for resume.",
         },
         model: {
           type: "string",
@@ -488,19 +487,6 @@ function enumValue<T extends string>(
   return value as T;
 }
 
-export function validateWindowsCwd(value: string): string {
-  if (value.includes("\0")) {
-    throw new Error("cwd contains a NUL character");
-  }
-  if (/^(?:\\\\|\/\/|\\\\[?.]\\|\\[?.]\\)/.test(value)) {
-    throw new Error("cwd must not be a UNC or Windows device path");
-  }
-  if (!/^[A-Za-z]:[\\/]/.test(value) || !path.win32.isAbsolute(value)) {
-    throw new Error("cwd must be an absolute Windows drive-letter path");
-  }
-  return path.win32.normalize(value);
-}
-
 function responseRecord(value: unknown, method: string): Record<string, unknown> {
   const record = asObject(value, `${method} response`);
   return record;
@@ -589,8 +575,14 @@ export class ControlSurface {
   constructor(
     private readonly appServer: AppServerManager,
     checkpoints?: CheckpointStore,
+    private readonly platformPolicy: PlatformPolicy = platformPolicyFor(),
   ) {
     this.checkpoints = checkpoints;
+  }
+
+  #cwd(args: Record<string, unknown>): string | undefined {
+    const input = optionalString(args, "cwd", 1_000);
+    return input ? this.platformPolicy.validateCwd(input) : undefined;
   }
 
   async call(name: string, rawArguments: unknown, signal?: AbortSignal): Promise<unknown> {
@@ -720,8 +712,7 @@ export class ControlSurface {
     if (args.include_turns !== undefined) {
       throw new Error("include_turns is valid only with thread_id");
     }
-    const cwdInput = optionalString(args, "cwd", 1_000);
-    const cwd = cwdInput ? validateWindowsCwd(cwdInput) : undefined;
+    const cwd = this.#cwd(args);
     const searchTerm = optionalString(args, "search_term", 500);
     const cursor = optionalString(args, "cursor", 10_000);
     const limit = optionalInteger(args, "limit", 1, 100) ?? 20;
@@ -756,11 +747,12 @@ export class ControlSurface {
     onlyKeys(args, ["text", "thread_id", "cwd", "model", "effort", "sandbox", "approval_policy"]);
     const text = requiredString(args, "text");
     const requestedThreadId = optionalString(args, "thread_id", 200);
-    const cwdInput = optionalString(args, "cwd", 1_000);
-    if (!requestedThreadId && !cwdInput) {
-      throw new Error("cwd is required when thread_id is omitted");
+    const cwd = this.#cwd(args);
+    if (!requestedThreadId && !cwd) {
+      throw new Error(
+        `cwd is required when thread_id is omitted and must be an ${this.platformPolicy.nativeCwdDescription}`,
+      );
     }
-    const cwd = cwdInput ? validateWindowsCwd(cwdInput) : undefined;
     const model = optionalString(args, "model", 100);
     const effort = optionalString(args, "effort", 32);
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);

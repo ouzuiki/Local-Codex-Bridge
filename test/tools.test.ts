@@ -4,6 +4,10 @@ import test from "node:test";
 import { AppServerManager } from "../src/app-server.js";
 import { RuntimeStore } from "../src/runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
+import {
+  DARWIN_PLATFORM_POLICY,
+  WINDOWS_PLATFORM_POLICY,
+} from "../src/platform.js";
 
 interface CapturedRequest {
   method: string;
@@ -70,7 +74,7 @@ test("codex_turn forwards each requested raw sandbox and the exact returned nati
         }
         throw new Error(`unexpected request ${method}`);
       });
-      const surface = new ControlSurface(manager);
+      const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
 
       await surface.call("codex_turn", {
         text: "test turn",
@@ -114,7 +118,7 @@ test("codex_turn uses the newly resolved policy when the same thread changes san
     }
     throw new Error(`unexpected request ${method}`);
   });
-  const surface = new ControlSurface(manager);
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
 
   await surface.call("codex_turn", {
     text: "first",
@@ -154,7 +158,7 @@ test("codex_turn omits turn-level sandboxPolicy when sandbox was not requested",
     }
     throw new Error(`unexpected request ${method}`);
   });
-  const surface = new ControlSurface(manager);
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
 
   await surface.call("codex_turn", { text: "default sandbox", cwd: "D:\\work" });
 
@@ -183,7 +187,7 @@ test("codex_turn fails closed before turn/start for unusable returned sandbox po
           ...(invalid.includeSandbox ? { sandbox: invalid.value } : {}),
         };
       });
-      const surface = new ControlSurface(manager);
+      const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
 
       await assert.rejects(
         surface.call("codex_turn", {
@@ -222,4 +226,29 @@ test("public tool schemas expose the same string bounds already enforced at runt
       `${tool}.${property}`,
     );
   }
+});
+
+test("ControlSurface delegates native cwd normalization to the selected policy", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "thread/start") {
+      return { thread: { id: "thread-darwin" } };
+    }
+    if (method === "turn/start") {
+      return { turn: { id: "turn-darwin", status: "inProgress" } };
+    }
+    throw new Error(`unexpected request ${method}`);
+  });
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY);
+
+  await surface.call("codex_turn", {
+    text: "native path",
+    cwd: "/Users/example/../bridge",
+  });
+
+  assert.equal(object(manager.requests[0]?.params).cwd, "/Users/bridge");
+  assert.equal(object(manager.requests[1]?.params).cwd, "/Users/bridge");
+  await assert.rejects(
+    surface.call("codex_turn", { text: "relative", cwd: "Users/example" }),
+    /absolute POSIX path on macOS/,
+  );
 });

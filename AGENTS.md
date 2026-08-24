@@ -2,7 +2,7 @@
 
 ## Project intent
 
-Local Codex Bridge is a thin Windows-oriented MCP stdio control surface for native Codex sessions. Its purpose is to let ChatGPT or another MCP client supervise official Codex threads without creating a second task system, transcript store, queue, retry loop, or authority layer.
+Local Codex Bridge is a thin MCP stdio control surface for native Codex sessions, with a shared Windows/macOS core and optional platform-specific surfaces. Its purpose is to let ChatGPT or another MCP client supervise official Codex threads without creating a second task system, transcript store, queue, retry loop, or authority layer.
 
 Keep the bridge thin. Native Codex owns persistent threads, turns, history, final messages, and execution capabilities. Bridge-owned state is limited to bounded live supervision data, pending requests, terminal snapshots, optional bounded checkpoints, and the optional UX projection.
 
@@ -44,7 +44,7 @@ Do not modify a user's Codex installation, Tunnel authentication/profile, unrela
 
 Inspect the current checkout and target machine before deciding how to install or run it. Do not copy maintainer-specific paths, profiles, ports, PIDs, readiness URLs, or executable locations.
 
-The published implementation currently requires Node.js 24+ and claims Windows support only. New-thread working directories must be absolute Windows drive-letter paths. Resolve the official Codex executable from the target machine's `PATH` or an explicit `CODEX_EXE`; do not add an npm Codex runtime dependency.
+The published implementation requires Node.js 24+ and supports Windows and macOS only. New-thread working directories must use the selected platform's absolute native path semantics: Windows drive-letter paths or macOS absolute POSIX paths. Resolve the official Codex executable from the target machine's `PATH` or an explicit `CODEX_EXE`; do not add an npm Codex runtime dependency.
 
 For a strict MCP stdio client or Tunnel, execute the built entry point with Node directly. `npm start` is suitable for a terminal but npm lifecycle output can corrupt a strict stdout protocol stream. Treat Secure MCP Tunnel setup as external configuration. If the optional Tray is needed, discover and supply that machine's readiness URL, Tunnel profile, and executable, then preserve its exact-process identity checks and no-auto-restart behavior.
 

@@ -20,6 +20,10 @@ import {
   resolveCheckpointDirectory,
 } from "../src/checkpoint.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
+import {
+  DARWIN_PLATFORM_POLICY,
+  WINDOWS_PLATFORM_POLICY,
+} from "../src/platform.js";
 
 const unavailableAppServer = {} as unknown as AppServerManager;
 
@@ -74,36 +78,90 @@ test("checkpoint is the sole addition to the existing tool catalog", () => {
   );
 });
 
-test("checkpoint directory resolution preserves legacy data and honors canonical aliases", () => {
+test("Windows checkpoint default preserves legacy data", {
+  skip: process.platform !== "win32",
+}, () => {
   const base = mkdtempSync(join(tmpdir(), "local-codex-bridge-checkpoint-config-test-"));
   const legacyDefault = join(base, "Lumen", "CodexControlV2", "checkpoints");
   const canonicalDefault = join(base, "LocalCodexBridge", "checkpoints");
 
   try {
-    assert.equal(resolveCheckpointDirectory({ LOCALAPPDATA: base }), canonicalDefault);
-    mkdirSync(legacyDefault, { recursive: true });
-    assert.equal(resolveCheckpointDirectory({ LOCALAPPDATA: base }), legacyDefault);
-
-    const explicitCanonical = join(base, "explicit-canonical");
-    const explicitLegacy = join(base, "explicit-legacy");
     assert.equal(
-      resolveCheckpointDirectory({
-        LOCALAPPDATA: base,
-        [CHECKPOINT_DIRECTORY_ENV]: explicitCanonical,
-        [LEGACY_CHECKPOINT_DIRECTORY_ENV]: explicitLegacy,
-      }),
-      explicitCanonical,
+      resolveCheckpointDirectory({ LOCALAPPDATA: base }, base, WINDOWS_PLATFORM_POLICY),
+      canonicalDefault,
     );
+    mkdirSync(legacyDefault, { recursive: true });
     assert.equal(
-      resolveCheckpointDirectory({
-        LOCALAPPDATA: base,
-        [LEGACY_CHECKPOINT_DIRECTORY_ENV]: explicitLegacy,
-      }),
-      explicitLegacy,
+      resolveCheckpointDirectory({ LOCALAPPDATA: base }, base, WINDOWS_PLATFORM_POLICY),
+      legacyDefault,
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("checkpoint overrides use injected native path semantics and preserve alias precedence", () => {
+  assert.equal(
+    resolveCheckpointDirectory(
+      {
+        [CHECKPOINT_DIRECTORY_ENV]: "D:/Bridge/canonical/../checkpoints",
+        [LEGACY_CHECKPOINT_DIRECTORY_ENV]: "E:/legacy",
+      },
+      "D:\\Users\\Example",
+      WINDOWS_PLATFORM_POLICY,
+    ),
+    "D:\\Bridge\\checkpoints",
+  );
+  assert.equal(
+    resolveCheckpointDirectory(
+      { [LEGACY_CHECKPOINT_DIRECTORY_ENV]: "E:/legacy/../checkpoints" },
+      "D:\\Users\\Example",
+      WINDOWS_PLATFORM_POLICY,
+    ),
+    "E:\\checkpoints",
+  );
+  assert.equal(
+    resolveCheckpointDirectory(
+      { [CHECKPOINT_DIRECTORY_ENV]: "\\\\server\\share\\bridge\\..\\checkpoints" },
+      "D:\\Users\\Example",
+      WINDOWS_PLATFORM_POLICY,
+    ),
+    "\\\\server\\share\\checkpoints",
+  );
+  assert.equal(
+    resolveCheckpointDirectory(
+      { [CHECKPOINT_DIRECTORY_ENV]: "\\\\?\\D:\\Bridge\\..\\checkpoints" },
+      "D:\\Users\\Example",
+      WINDOWS_PLATFORM_POLICY,
+    ),
+    "\\\\?\\D:\\checkpoints",
+  );
+  assert.equal(
+    resolveCheckpointDirectory(
+      { [CHECKPOINT_DIRECTORY_ENV]: "/Users/example/bridge/../checkpoints" },
+      "/Users/example",
+      DARWIN_PLATFORM_POLICY,
+    ),
+    "/Users/example/checkpoints",
+  );
+});
+
+test("Darwin checkpoint default uses Application Support without Windows fallback", () => {
+  assert.equal(
+    resolveCheckpointDirectory(
+      {
+        LOCALAPPDATA: "D:\\must-not-be-used",
+        USERPROFILE: "D:\\must-not-be-used",
+      },
+      "/Users/example",
+      DARWIN_PLATFORM_POLICY,
+    ),
+    "/Users/example/Library/Application Support/LocalCodexBridge/checkpoints",
+  );
+  assert.throws(
+    () => resolveCheckpointDirectory({}, "relative-home", DARWIN_PLATFORM_POLICY),
+    /absolute macOS home directory/,
+  );
 });
 
 test("checkpoint keeps immutable original plus only previous/current across store instances", async () => {
