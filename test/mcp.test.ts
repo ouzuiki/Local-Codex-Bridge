@@ -103,6 +103,12 @@ function toolPayload(response: Record<string, unknown>): Record<string, unknown>
   return JSON.parse(content[0]?.text as string) as Record<string, unknown>;
 }
 
+function successfulToolPayload(response: Record<string, unknown>): Record<string, unknown> {
+  const result = response.result as Record<string, unknown>;
+  assert.notEqual(result.isError, true, "expected successful MCP tools/call result");
+  return toolPayload(response);
+}
+
 async function initialize(client: TestClient, id: RpcId): Promise<void> {
   const response = await client.request(id, "initialize", {
     protocolVersion: "2025-03-26",
@@ -112,7 +118,7 @@ async function initialize(client: TestClient, id: RpcId): Promise<void> {
   assert.equal(response.error, undefined);
 }
 
-test("MCP stdio initializes idempotently and lists exactly seven fully annotated tools", async () => {
+test("MCP stdio initializes idempotently and lists exactly eight fully annotated tools", async () => {
   const client = new TestClient();
   try {
     const initializeLine = JSON.stringify({
@@ -184,6 +190,7 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
     const tools = (listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
     assert.deepEqual(tools.map((tool) => tool.name), [
       "codex_threads",
+      "codex_models",
       "codex_turn",
       "codex_observe",
       "codex_steer",
@@ -200,6 +207,12 @@ test("MCP stdio initializes idempotently and lists exactly seven fully annotated
         assert.equal(typeof annotations[hint], "boolean", `${String(tool.name)} ${hint}`);
       }
     }
+    const modelsTool = tools.find((tool) => tool.name === "codex_models");
+    assert.match(modelsTool?.description as string, /model\/list/);
+    const modelProperties = (modelsTool?.inputSchema as Record<string, unknown>)
+      .properties as Record<string, unknown>;
+    assert.ok("cursor" in modelProperties);
+    assert.ok("include_hidden" in modelProperties);
     const respondTool = tools.find((tool) => tool.name === "codex_respond");
     assert.equal(
       (respondTool?.annotations as Record<string, unknown>).idempotentHint,
@@ -413,7 +426,7 @@ test("MCP duplicate active typed id preserves cancellation suppression and safe 
     const replacement = await nextMessage();
     assert.equal(replacement.id, 17);
     assert.equal(replacement.error, undefined);
-    const payload = toolPayload(replacement);
+    const payload = successfulToolPayload(replacement);
     assert.deepEqual(
       (payload.events as Array<Record<string, unknown>>).map((event) => event.method),
       ["item/started"],
@@ -446,7 +459,7 @@ test("checkpoint preserves immutable intent and bounded state across MCP process
   try {
     first = new TestClient(environment);
     await initialize(first, 1);
-    const missing = toolPayload(await first.request(2, "tools/call", {
+    const missing = successfulToolPayload(await first.request(2, "tools/call", {
       name: "codex_checkpoint",
       arguments: { action: "read", thread_id: threadId },
     }));
@@ -458,7 +471,7 @@ test("checkpoint preserves immutable intent and bounded state across MCP process
     });
     assert.deepEqual(readdirSync(checkpointDirectory), []);
 
-    const initialized = toolPayload(await first.request(3, "tools/call", {
+    const initialized = successfulToolPayload(await first.request(3, "tools/call", {
       name: "codex_checkpoint",
       arguments: {
         action: "update",
@@ -476,7 +489,7 @@ test("checkpoint preserves immutable intent and bounded state across MCP process
     const initialCheckpoint = initialized.checkpoint as Record<string, unknown>;
     assert.equal(initialCheckpoint.previous, null);
 
-    const updated = toolPayload(await first.request(4, "tools/call", {
+    const updated = successfulToolPayload(await first.request(4, "tools/call", {
       name: "codex_checkpoint",
       arguments: {
         action: "update",
@@ -518,7 +531,7 @@ test("checkpoint preserves immutable intent and bounded state across MCP process
 
     second = new TestClient(environment);
     await initialize(second, 1);
-    const recovered = toolPayload(await second.request(2, "tools/call", {
+    const recovered = successfulToolPayload(await second.request(2, "tools/call", {
       name: "codex_checkpoint",
       arguments: { action: "read", thread_id: threadId },
     }));
@@ -537,7 +550,7 @@ test("checkpoint preserves immutable intent and bounded state across MCP process
       "The file write succeeded; restart recovery remains unverified.",
     );
 
-    const rotated = toolPayload(await second.request(3, "tools/call", {
+    const rotated = successfulToolPayload(await second.request(3, "tools/call", {
       name: "codex_checkpoint",
       arguments: {
         action: "update",

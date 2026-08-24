@@ -97,6 +97,37 @@ lines.on("line", (line) => {
     send({ id: message.id, result: { data: [{ id: "stored-thread", cwd: "D:\\Bridge" }], nextCursor: null, backwardsCursor: null } });
     return;
   }
+  if (message.method === "model/list") {
+    const models = [
+      {
+        id: "visible-model",
+        model: "visible-model-native",
+        displayName: "Visible Model",
+        hidden: false,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [
+          { reasoningEffort: "low", description: "Fast" },
+          { reasoningEffort: "medium", description: "Balanced" },
+        ],
+        inputModalities: ["text", "image"],
+        supportsPersonality: true,
+        isDefault: true,
+        futureField: { preserved: true },
+      },
+      {
+        id: "hidden-model",
+        model: "hidden-model-native",
+        displayName: "Hidden Model",
+        hidden: true,
+        supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep" }],
+      },
+    ];
+    const selected = models
+      .filter((model) => message.params.includeHidden || !model.hidden)
+      .slice(0, message.params.limit);
+    send({ id: message.id, result: { data: selected, nextCursor: null } });
+    return;
+  }
   if (message.method === "thread/read") {
     send({
       id: message.id,

@@ -32,6 +32,14 @@ class RejectingResponseManager extends AppServerManager {
   }
 }
 
+class CapturingResponseManager extends AppServerManager {
+  readonly responses: Array<{ id: string | number; result: unknown }> = [];
+
+  override async respond(id: string | number, result: unknown): Promise<void> {
+    this.responses.push({ id, result });
+  }
+}
+
 class ControlledBackpressureSink extends EventEmitter {
   writable = true;
   writableEnded = false;
@@ -183,6 +191,134 @@ test("failed app-server response write restores the original pending request", a
     const pending = manager.runtime.pendingForThread("thread-restore") as Array<Record<string, unknown>>;
     assert.equal(pending.length, 1);
     assert.equal(pending[0]?.request_id, 41);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("codex_respond sends exact stable permission responses including an empty grant", async () => {
+  const manager = new CapturingResponseManager();
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+  manager.runtime.markTurnAccepted("thread-permissions", "turn-permissions");
+  manager.runtime.recordServerRequest("permissions-session", "item/permissions/requestApproval", {
+    threadId: "thread-permissions",
+    turnId: "turn-permissions",
+    permissions: { network: true, fileSystem: true },
+  });
+  manager.runtime.recordServerRequest("permissions-empty", "item/permissions/requestApproval", {
+    threadId: "thread-permissions",
+    turnId: "turn-permissions",
+    permissions: { network: true },
+  });
+
+  try {
+    await control.call("codex_respond", {
+      request_id: "permissions-session",
+      thread_id: "thread-permissions",
+      turn_id: "turn-permissions",
+      method: "item/permissions/requestApproval",
+      permissions: { network: true },
+      scope: "session",
+    });
+    await control.call("codex_respond", {
+      request_id: "permissions-empty",
+      thread_id: "thread-permissions",
+      turn_id: "turn-permissions",
+      method: "item/permissions/requestApproval",
+      permissions: {},
+    });
+
+    assert.deepEqual(manager.responses, [
+      {
+        id: "permissions-session",
+        result: { permissions: { network: true }, scope: "session" },
+      },
+      {
+        id: "permissions-empty",
+        result: { permissions: {} },
+      },
+    ]);
+    assert.deepEqual(manager.runtime.pendingForThread("thread-permissions"), []);
+  } finally {
+    await manager.close();
+  }
+});
+
+test("codex_respond rejects malformed or mixed permission contracts without claiming pending requests", async (t) => {
+  const cases: Array<{ name: string; extra: Record<string, unknown>; error: RegExp }> = [
+    {
+      name: "missing permissions",
+      extra: { decision: "decline" },
+      error: /requires permissions/,
+    },
+    {
+      name: "mixed approval decision",
+      extra: { permissions: {}, decision: "decline" },
+      error: /accepts only permissions and optional scope/,
+    },
+    {
+      name: "permissions is not an object",
+      extra: { permissions: [] },
+      error: /permissions must be an object/,
+    },
+    {
+      name: "invalid scope",
+      extra: { permissions: {}, scope: "global" },
+      error: /scope must be one of: turn, session/,
+    },
+  ];
+
+  for (const [index, current] of cases.entries()) {
+    await t.test(current.name, async () => {
+      const manager = new CapturingResponseManager();
+      const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+      const requestId = `permissions-malformed-${index}`;
+      manager.runtime.markTurnAccepted("thread-permissions-bad", "turn-permissions-bad");
+      manager.runtime.recordServerRequest(requestId, "item/permissions/requestApproval", {
+        threadId: "thread-permissions-bad",
+        turnId: "turn-permissions-bad",
+      });
+      try {
+        await assert.rejects(
+          control.call("codex_respond", {
+            request_id: requestId,
+            thread_id: "thread-permissions-bad",
+            turn_id: "turn-permissions-bad",
+            method: "item/permissions/requestApproval",
+            ...current.extra,
+          }),
+          current.error,
+        );
+        assert.deepEqual(manager.responses, []);
+        assert.equal(manager.runtime.pendingForThread("thread-permissions-bad").length, 1);
+      } finally {
+        await manager.close();
+      }
+    });
+  }
+});
+
+test("codex_respond rejects permission fields on other approval contracts", async () => {
+  const manager = new CapturingResponseManager();
+  const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+  manager.runtime.markTurnAccepted("thread-mixed", "turn-mixed");
+  manager.runtime.recordServerRequest("mixed-permissions", "item/fileChange/requestApproval", {
+    threadId: "thread-mixed",
+    turnId: "turn-mixed",
+  });
+  try {
+    await assert.rejects(
+      control.call("codex_respond", {
+        request_id: "mixed-permissions",
+        thread_id: "thread-mixed",
+        turn_id: "turn-mixed",
+        method: "item/fileChange/requestApproval",
+        permissions: {},
+      }),
+      /permissions and scope are valid only for item\/permissions\/requestApproval/,
+    );
+    assert.deepEqual(manager.responses, []);
+    assert.equal(manager.runtime.pendingForThread("thread-mixed").length, 1);
   } finally {
     await manager.close();
   }
@@ -502,11 +638,11 @@ test("duplicate app-server request ids fail the protocol without an ambiguous re
   }
 });
 
-test("unsupported pending app-server requests remain observable and are never answered", async () => {
+test("unsupported elicitation requests remain observable and are never answered", async () => {
   const manager = new RejectingResponseManager();
   const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   manager.runtime.markTurnAccepted("thread-unknown", "turn-unknown");
-  manager.runtime.recordServerRequest("future-1", "test/unknownServerRequest", {
+  manager.runtime.recordServerRequest("future-1", "mcpServer/elicitation/request", {
     threadId: "thread-unknown",
     turnId: "turn-unknown",
     api_key: "must-redact",
@@ -518,17 +654,17 @@ test("unsupported pending app-server requests remain observable and are never an
         request_id: "future-1",
         thread_id: "thread-unknown",
         turn_id: "turn-unknown",
-        method: "test/unknownServerRequest",
+        method: "mcpServer/elicitation/request",
         response: { guessed: true },
       }),
-      /Unsupported app-server request method: test\/unknownServerRequest; pending request remains observable/,
+      /Unsupported app-server request method: mcpServer\/elicitation\/request; pending request remains observable/,
     );
     assert.equal(manager.lastResponseId, undefined);
     const observed = manager.runtime.observe("thread-unknown", 0, 10);
     const pending = observed?.pending_requests as Array<Record<string, unknown>>;
     assert.equal(pending.length, 1);
     assert.equal(pending[0]?.request_id, "future-1");
-    assert.equal(pending[0]?.method, "test/unknownServerRequest");
+    assert.equal(pending[0]?.method, "mcpServer/elicitation/request");
     assert.equal(pending[0]?.thread_id, "thread-unknown");
     assert.equal(pending[0]?.turn_id, "turn-unknown");
     assert.equal((pending[0]?.params as Record<string, unknown>).api_key, "[REDACTED]");
@@ -540,6 +676,8 @@ test("unsupported pending app-server requests remain observable and are never an
 test("codex_respond metadata does not advertise generic future-method responses", () => {
   const respondTool = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_respond");
   assert.match(respondTool?.description ?? "", /Unsupported or unknown methods fail locally and remain pending/);
+  assert.match(respondTool?.description ?? "", /item\/permissions\/requestApproval/);
+  assert.doesNotMatch(respondTool?.description ?? "", /elicitation/i);
   const response = (respondTool?.inputSchema.properties as Record<string, unknown>).response as Record<string, unknown>;
   assert.match(response.description as string, /unsupported or future methods remain pending/);
 });

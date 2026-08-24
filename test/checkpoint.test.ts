@@ -27,9 +27,10 @@ import {
 
 const unavailableAppServer = {} as unknown as AppServerManager;
 
-test("checkpoint is the sole addition to the existing tool catalog", () => {
+test("checkpoint remains the final tool in the current tool catalog", () => {
   assert.deepEqual(TOOL_DEFINITIONS.map((tool) => tool.name), [
     "codex_threads",
+    "codex_models",
     "codex_turn",
     "codex_observe",
     "codex_steer",
@@ -43,6 +44,7 @@ test("checkpoint is the sole addition to the existing tool catalog", () => {
     /Prefer continuing the same native thread when its context remains useful, but a fresh thread is allowed/,
   );
   assert.match(turn?.description ?? "", /thread_id is not a permanent task identity/);
+  assert.match(turn?.description ?? "", /outcome is UNKNOWN/);
   const checkpoint = TOOL_DEFINITIONS.at(-1);
   assert.match(
     checkpoint?.description ?? "",
@@ -76,6 +78,9 @@ test("checkpoint is the sole addition to the existing tool catalog", () => {
     steer?.description ?? "",
     /steer only for a semantic redirect or correction based on new evidence or changed user intent/,
   );
+  assert.match(steer?.description ?? "", /outcome is UNKNOWN/);
+  const interrupt = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_interrupt");
+  assert.match(interrupt?.description ?? "", /outcome is UNKNOWN/);
 });
 
 test("Windows checkpoint default preserves legacy data", {

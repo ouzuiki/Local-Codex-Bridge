@@ -1,64 +1,239 @@
 # Local Codex Bridge
 
-*A thin MCP control bridge from ChatGPT to native Codex sessions.*
+*A thin supervisory MCP bridge between external AI supervisors and native Codex.*
 
-Local Codex Bridge 是一个面向 Windows 与 macOS 的轻量 MCP stdio 桥接器：它让 ChatGPT（或其他 MCP 客户端）能够调用本机原生 Codex 会话，同时把真正的线程、回合、历史记录和执行能力继续交给官方 Codex app-server 管理。
+Local Codex Bridge 是一个面向 Windows 与 macOS 的轻量 MCP stdio 适配器：
 
-它解决的是一个很具体的问题：ChatGPT 适合对话、拆解目标和持续监督，Codex 则能在本机工作区里使用真实的文件、命令和开发工具。Bridge 在两者之间提供 7 个边界清楚的控制工具，不再额外发明一套任务系统。
+```text
+ChatGPT / external AI supervisor
+              ↕
+        Local Codex Bridge
+              ↕
+      native Codex app-server
+              ↕
+   native Codex threads / turns
+```
+
+它解决的不是“再造一个 Codex”，而是让擅长对话、规划和持续监督的 AI，可以直接监督本机原生 Codex 完成真实工程任务。
+
+**监督者负责目标、资源、边界、风险、审批与验收；Codex 保留原生的编码与执行自主性。**
+
+Bridge 本身保持薄层：
+
+- 不创建第二套 job / task 系统；
+- 不复制 Codex 对话历史；
+- 不维护平行线程数据库；
+- 不缓存“当前模型”状态；
+- 不替代 Codex 自己的 session / thread / turn 语义。
+
+**原生 Codex thread/session 始终是执行事实源。**
 
 ## 当前测试候选版本
 
-**V2.1.3** · [查看更新日志](CHANGELOG.md)
+**V2.1.3** · [CHANGELOG](CHANGELOG.md)
 
-本版本补齐晚到原生响应的保守对账、重复待响应 ID 与响应占用边界、原生 sandbox policy 传递，以及公开 schema 与运行时限制的一致性。Windows 与 macOS 现在共用同一核心实现，只在原生路径、checkpoint 默认目录、进程启动和终止机制处保留明确的平台边界。
+V2.1.3 继续收紧 Bridge 作为 supervisory adapter 的边界，并补充：
 
-## 它是怎样工作的
+- 原生 `model/list` 的按需发现；
+- `codex_turn` 的可选 model / reasoning-effort override；
+- stable permission approval response；
+- mutating acknowledgement timeout 的 UNKNOWN 语义；
+- 公开工具描述与运行时约束的一致性；
+- 统一版本锚点与升级假设检查。
 
-真实的数据链路是：
+Windows 与 macOS 共用同一核心 Bridge，实现差异只保留在平台原生路径、launcher、checkpoint 默认目录、进程启动与终止等系统边界。
+
+------
+
+## 谁负责什么
+
+### External supervisor / ChatGPT
+
+适合负责：
+
+- 理解用户目标；
+- 拆解任务；
+- 决定工作范围与风险边界；
+- 选择何时继续观察、纠正、审批或中断；
+- 判断结果是否满足验收条件；
+- 在 Codex 无法自行安全决定时提供监督。
+
+### Native Codex
+
+继续负责：
+
+- 原生 thread / turn 生命周期；
+- 工作区文件与命令执行；
+- Codex 自己的上下文与历史；
+- sandbox 与 approval-policy 行为；
+- 模型和 reasoning effort 的真实运行状态；
+- 持久化的原生执行结果。
+
+### Local Codex Bridge
+
+只负责把两者接起来：
+
+- MCP stdio ↔ Codex app-server JSONL；
+- 有界地暴露监督所需状态；
+- 转发明确的控制意图；
+- 对高风险、歧义或协议边界 fail closed；
+- 不把自己升级成第二个 orchestration runtime。
+
+------
+
+## 8 个 MCP 工具
+
+| Tool               | 用途                                                         | 边界                                                         |
+| ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| `codex_threads`    | 列出、搜索、读取原生 Codex 持久线程                          | `cwd` / search 只是筛选条件，不是 ACL                        |
+| `codex_models`     | 按需读取一页原生 `model/list`                                | 不缓存模型目录，不维护 current-model registry                |
+| `codex_turn`       | 创建或恢复原生 thread，并启动一个 turn                       | 返回 accepted 不等于任务完成；model / effort 都是可选 override |
+| `codex_observe`    | 有界读取实时事件、持久历史、pending requests、terminal state 与 cursor | 支持一次 bounded wait；安静不等于卡死                        |
+| `codex_steer`      | 对同一个 active turn 追加语义纠正或新意图                    | 不是 timer、polling 或 retry 机制                            |
+| `codex_respond`    | 回答真实存在且 Bridge 明确支持的 approval / user-input / permission request | 必须保留原始 request id 和准确 scope；不支持 elicitation     |
+| `codex_interrupt`  | 中断准确的 active thread / turn                              | 只发送原生 interrupt，不重启 Bridge 或 app-server            |
+| `codex_checkpoint` | 保存可选、精简、有界的 supervisory anchor                    | 不是 transcript、job id 或 Codex history 的替代品            |
+
+完整 schema 与运行时限制以 [`src/tools.ts`](src/tools.ts) 为准。
+
+------
+
+## Model 与 reasoning effort
+
+Bridge 不接管 Codex 的模型状态。
+
+### 普通 continuation
+
+如果 `codex_turn` 没有显式传入 `model` 或 `effort`：
+
+- Bridge 不调用 `model/list`；
+- 不推断当前模型；
+- 不发送新的 model / effort override；
+- 原生 Codex thread 自己继续保持已有状态。
+
+### 显式 model override
+
+如果 supervisor 明确指定 `model`：
+
+Bridge 会临时读取一份新的、包含 hidden models 的原生 `model/list` catalog 来验证该模型是否存在。
+
+这个 catalog：
+
+- 只用于当前请求；
+- 有分页和循环保护；
+- 不持久化；
+- 不形成模型 registry 或 cache。
+
+### `model + effort`
+
+如果同时指定模型和 reasoning effort：
+
+Bridge 只在原生 catalog **明确证明不兼容**时本地拒绝。
+
+如果 upstream 没有提供足够的 compatibility metadata，Bridge 不自行猜测，而把最终决定留给 native Codex。
+
+### effort-only
+
+如果只提供 `effort`：
+
+Bridge 不尝试推断当前 thread 正在使用哪个模型。
+
+它只会拒绝一个在当前 catalog 所有已公布 reasoning-effort token 中都不存在的值；这个 effort 对当前真实模型是否可用，仍由 app-server 决定。
+
+`thread/read` 也不会被 Bridge 当作 current-model registry 的来源。
+
+------
+
+## 监督一个 turn
+
+`codex_turn` 的成功返回只表示 native `turn/start` 已被接受。
+
+长任务通常应继续通过 `codex_observe` 监督，而不是把“请求已接受”误认为“任务已经完成”。
+
+一个典型流程是：
 
 ```text
-ChatGPT / 其他 MCP 客户端
-        │
-        │ MCP JSON-RPC（stdio；远程场景可由 Secure MCP Tunnel 接入）
-        ▼
-Local Codex Bridge
-        │
-        │ Codex app-server JSONL（stdio）
-        ▼
-官方 Codex：codex app-server --listen stdio://
-        │
-        └── 本机原生线程、回合、历史记录与执行权限
+codex_turn
+    ↓
+codex_observe
+    ↓
+ ┌───────────────┬────────────────┬─────────────────┐
+ │ continue      │ steer          │ respond         │
+ │ observing     │ same turn      │ real pending    │
+ │               │                │ request         │
+ └───────────────┴────────────────┴─────────────────┘
+    ↓
+terminal state / acceptance
 ```
 
-换句话说，Local Codex Bridge 是提供给 ChatGPT 的 MCP Server；Codex app-server 是 Bridge 在内部驱动原生 Codex 的官方协议进程。它们不是同一个接口，也不是两套并行的任务系统。
+几个重要原则：
 
-当工具首次需要原生 Codex 时，Bridge 会懒启动一个官方 app-server 子进程。Bridge 自己不创建 job ID、不维护队列、不保存第二份对话历史，也不会自动重试或自动重启意外退出的 app-server。
+- 长时间没有新命令输出，不足以证明 Codex 卡住；
+- steer 应代表新的语义信息或纠正，而不是定时催促；
+- respond 只能回答真实存在的 pending request；
+- interrupt 只在确实需要停止当前 turn 时使用；
+- `thread_id` 是 native Codex thread identity，不是 Bridge 发明的永久 task ID。
 
-## 7 个 MCP 工具
+------
 
-| 工具 | 用途 | 重要边界 |
-| --- | --- | --- |
-| `codex_threads` | 列出、搜索或读取原生 Codex 持久线程 | `cwd` 和搜索词只是筛选条件，不是权限边界；不会重建已经丢失的 Bridge 实时事件 |
-| `codex_turn` | 新建或恢复线程，并启动一个回合 | 新线程必须提供当前平台的绝对原生路径；返回“已接受”不等于任务完成 |
-| `codex_observe` | 读取有界的实时事件、待处理请求、终态和游标 | `wait_ms` 最长 10 秒，只做一次事件驱动等待；安静不代表卡死 |
-| `codex_steer` | 向同一个活动回合追加纠正或新意图 | 必须匹配准确的 `thread_id` 和 `expected_turn_id`；不会新建回合 |
-| `codex_respond` | 回答真实的审批、用户输入、权限或 elicitation 请求 | 必须使用原始 request ID 及准确的线程、方法和回合范围；不能虚构请求 |
-| `codex_interrupt` | 中断准确的活动线程与回合 | 只发送原生 `turn/interrupt`；不会停止或重启 Bridge / app-server |
-| `codex_checkpoint` | 为长任务保存可选、精简且有界的监督锚点 | 不是转录、日志、任务 ID 或 Codex 历史；原始目标、约束和验收条件初始化后不可变 |
+## UNKNOWN：不要直接重试 mutating request
 
-所有工具都公开对象输入 schema，以及 MCP 的只读、破坏性、幂等和 open-world 提示。完整字段和限制以 [`src/tools.ts`](src/tools.ts) 为准。
+以下原生请求如果已经成功写入 app-server，但等待 acknowledgement 超时：
+
+- `thread/start`
+- `thread/resume`
+- `turn/start`
+- `turn/steer`
+- `turn/interrupt`
+
+Bridge 会把结果视为：
+
+**UNKNOWN / possibly accepted**
+
+这不等于失败。
+
+请求可能已经被 native Codex 接受，只是 acknowledgement 没有及时返回。
+
+因此 supervisor 应：
+
+1. 先 `codex_observe` 或读取 native state；
+2. 判断原操作是否已经发生；
+3. 再决定是否需要后续动作。
+
+**不要因为 timeout 直接重发 mutating request。**
+
+Bridge 不自动替 supervisor 做这种 retry。
+
+------
+
+## Elicitation 目前不受支持
+
+`mcpServer/elicitation/request` 当前没有进入 Bridge 的 supported response surface。
+
+如果 native Codex 发出这类 request：
+
+- Bridge 会保留并暴露它；
+- 不会静默吞掉；
+- 不会猜测 response schema；
+- 不会通过 `codex_respond` 随便构造答案。
+
+只有未来存在明确、稳定并经过验证的上游 contract 时，才值得考虑支持。
+
+------
 
 ## 快速开始
 
 ### 环境要求
 
 - Windows 或 macOS
-- Node.js 24 或更高版本
-- 官方 Codex 可执行文件：可以直接通过 `codex` 命令找到，也可以用 `CODEX_EXE` 指定
+- Node.js 24+
+- 官方 Codex executable
+  - 可以直接通过 `codex` 找到；
+  - 或使用 `CODEX_EXE` 显式指定。
 
-本项目不捆绑、也不依赖 `@openai/codex` npm 包。
+本项目不捆绑、也不依赖 `@openai/codex` npm package。
 
-### 安装、构建与测试
+### Clone、构建与测试
 
 ```powershell
 git clone https://github.com/zoeynine/Local-Codex-Bridge.git
@@ -69,48 +244,71 @@ npm run build
 npm test
 ```
 
-构建后可在终端直接启动：
+直接启动：
 
 ```powershell
 $env:CODEX_EXE = 'C:\path\to\codex.exe' # codex 已在 PATH 时可省略
 npm start
 ```
 
-接入 MCP 客户端时，请把 stdio 命令直接配置为：
+### 配置 MCP client
+
+严格的 MCP stdio client 应直接启动构建后的 Node entry：
 
 ```text
 command: node
 args:    C:\absolute\path\to\Local-Codex-Bridge\dist\src\index.js
-env:     CODEX_EXE=C:\path\to\codex.exe   # 可选
+env:     CODEX_EXE=C:\path\to\codex.exe   # optional
 ```
 
-macOS 使用同一个构建入口，只需把 `args` 换成仓库中 `dist/src/index.js` 的绝对 POSIX 路径；`CODEX_EXE` 同样可以省略或指向本机官方 Codex 可执行文件。
+macOS 使用同一个构建入口，只需把 `args` 换成 `dist/src/index.js` 的绝对 POSIX path。
 
-不同客户端的配置文件格式并不相同，但最终应直接运行 `node dist/src/index.js`。不要在 Secure MCP Tunnel 或其他严格的 JSON-RPC stdio 客户端后面使用 `npm start`，因为 npm 生命周期输出可能污染 stdout 协议流。
+不同 MCP client 的配置格式可能不同，但最终应直接运行：
 
-## 如何监督一个回合
+```text
+node <repository>/dist/src/index.js
+```
 
-`codex_turn` 只确认 `turn/start` 已被接受。需要持续监督时，应使用有界的 `codex_observe` 等到终态，并在每次返回后检查新事件、待处理请求和当前状态，再决定是否继续观察、`codex_steer`、`codex_respond` 或 `codex_interrupt`。
+不要在 Secure MCP Tunnel 或其他严格 JSON-RPC stdio transport 后使用 `npm start`，因为 npm lifecycle output 可能污染 stdout 协议流。
 
-- 长时间没有新命令或输出，不足以证明 Codex 卡住了。
-- 只有新证据或用户意图发生变化时才应 steer。
-- 只有确实存在的 pending request 才能 respond。
-- 只有明确需要停止当前回合时才应 interrupt。
-- 是否复用线程取决于任务连续性和上下文价值；`thread_id` 不是永久任务编号。
+当 Bridge 的 MCP tool set 发生变化后，已经连接的 MCP client 通常需要重新连接或重启，才能刷新自己的 tool catalog。
+
+------
 
 ## 可选：Secure MCP Tunnel
 
-远程 MCP 连接可以在 Bridge 前面放置 Secure MCP Tunnel。先完成构建，再把 Tunnel 的 MCP command 指向：
+远程 MCP 场景可以在 Bridge 前面使用 Secure MCP Tunnel：
 
 ```text
-node <repository>\dist\src\index.js
+remote MCP client
+        ↕
+Secure MCP Tunnel
+        ↕
+node <repository>/dist/src/index.js
+        ↕
+native Codex
 ```
 
-Tunnel 的安装、认证、profile、端口、ready endpoint 和进程生命周期都属于外部配置。本仓库不会创建或修改 Tunnel profile，也没有内置生产端口或凭据。
+Tunnel 的认证、profile、port、ready endpoint 和进程生命周期属于外部配置。
 
-## 可选：Windows Tray
+本仓库：
 
-`windows/` 中的 Tray 是单独安装的 Tunnel client 的轻量启动与状态层，不是 Bridge 的必要组成部分。规范入口是 `LocalCodexBridgeTray.*`。它读取命令行参数、generic 环境变量，或本机 ignored 文件 `windows/local-settings.json`：
+- 不创建 Tunnel profile；
+- 不保存生产凭据；
+- 不内置生产端口；
+- 不把 Tunnel control plane 变成 Bridge 自己的 HTTP API。
+
+------
+
+## Windows
+
+### Optional Tray
+
+`windows/` 中的 Tray 是已安装 Tunnel client 的轻量启动与状态层，不是 Bridge 核心运行时的必需组件。
+
+Canonical launcher 名为 `LocalCodexBridgeTray.*`。
+
+调试启动示例：
 
 ```powershell
 .\windows\LocalCodexBridgeTray.Debug.cmd `
@@ -119,38 +317,179 @@ Tunnel 的安装、认证、profile、端口、ready endpoint 和进程生命周
   -TunnelExecutable 'C:\path\to\tunnel-client.exe'
 ```
 
-本机 settings 文件的模板是 [`windows/local-settings.example.json`](windows/local-settings.example.json)，实际的 `windows/local-settings.json` 不进入 Git。解析优先级为：显式命令行参数、`LOCAL_CODEX_BRIDGE_*` 环境变量、旧的 `LUMEN_CODEX_V2_*` 环境变量、ignored local settings。新安装没有 local settings 时，Tray 会要求显式提供必要配置；不会把维护者机器的 profile、端口或可执行文件写入 tracked tree。
+Local settings 模板：
 
-旧的 `LumenCodexControlV2Tray.*` launcher 文件名和旧环境变量仍作为兼容入口保留；它们只转发到同一份 canonical implementation，不代表第二套产品或第二套配置。现有旧 checkpoint/UX 路径也不会被迁移或删除。
+[`windows/local-settings.example.json`](windows/local-settings.example.json)
 
-Tray 不会自动重启 Tunnel。它只检查配置的 readiness URL；停止时，也只会在可执行路径、命令行、profile、启动时间、PID 和 PID 文件重新核验一致后，停止由当前 Tray 实例启动的那个 Tunnel 进程。
+实际的：
 
-## 可选：macOS Launcher
+```text
+windows/local-settings.json
+```
 
-`Start Mac Codex Bridge.app`、`launcher/` 与 `bin/start-production-tunnel` 是 macOS 的 Finder 启动与 Tunnel 凭据/锁定资产。它们与 Windows Tray 一样只是平台外层，Bridge 本身仍直接运行同一个 `dist/src/index.js`。Finder app 中的 universal launcher 和 ad-hoc 签名是现有可分发 bundle 的组成部分；修改 launcher 或 bundle 后应在 macOS 12+ 上运行 `launcher/build-launcher.sh` 重新构建、签名并执行 `npm run test:macos`。
+保持 ignored，不进入 Git。
+
+配置优先级：
+
+1. 显式命令行参数；
+2. `LOCAL_CODEX_BRIDGE_*` 环境变量；
+3. legacy `LUMEN_CODEX_V2_*` 环境变量；
+4. ignored local settings。
+
+旧的 `LumenCodexControlV2Tray.*` launcher 和 legacy env names 目前只作为兼容入口保留，不代表第二套产品。
+
+Tray 不自动重启 Tunnel，并且只会在 process identity、profile、PID 等信息重新核验一致后，停止由当前 Tray 实例启动的进程。
+
+------
+
+## macOS
+
+`Start Mac Codex Bridge.app`、`launcher/` 与 `bin/start-production-tunnel` 提供 macOS Finder / Tunnel 平台集成。
+
+它们只是平台外层；真正的 Bridge 仍然运行同一个：
+
+```text
+dist/src/index.js
+```
+
+修改 launcher 或 Finder bundle 后，应在 macOS 12+ 上重新构建并验证：
+
+```bash
+launcher/build-launcher.sh
+npm run test:macos
+```
+
+Windows 与 macOS 是同一 Bridge 的两个平台入口，而不是两套独立实现。
+
+------
 
 ## 安全与信任边界
 
-Local Codex Bridge 不会创建新的操作系统沙箱。真正的文件、命令、网络和进程权限，来自官方 Codex 的配置，以及每个回合请求的 `sandbox` 与 `approval_policy`。`danger-full-access` 会放宽沙箱对文件、命令和进程访问的限制；`approval_policy=never` 不会扩大操作系统沙箱，但会取消交互式审批这道确认环节。两者的风险来源不同，都应只在已经理解并接受相应边界时使用。
+Local Codex Bridge **不会创建新的操作系统 sandbox**。
 
-还需要明确以下边界：
+真正的文件、命令、网络与进程能力仍由 native Codex 的配置，以及每个 turn 的：
 
-- `codex_turn` / `codex_steer` 传入的文本可能促使 Codex 使用其已配置的命令和文件能力；“没有直接暴露 shell 工具”不等于“不会执行本机操作”。
-- `codex_threads` 能看到同一操作系统用户和同一 Codex app-server 可见的持久线程；`cwd` 与搜索条件不能隔离访问。
-- Bridge 会把自身进程环境继承给 app-server 子进程，但会从该子进程环境中单独移除 Tunnel 使用的 `CONTROL_PLANE_API_KEY`；其他启动环境仍应被视为可信边界，不要放入无关且不必要的秘密。
-- 实时事件和 pending request 会被限量，并对明显的敏感内容做清理；这只能减少意外暴露，不能把 Bridge 变成敌对多租户网关或跨用户隔离层。
-- 远程使用时，应由经过认证、配置正确的 Tunnel 提供连接边界；不要把本地 stdio 控制面直接暴露给不可信来源。
-- checkpoint 应保持简短且不含敏感信息；不要保存 prompt、逐字记录、原始事件、命令输出或最终回答。
+- `sandbox`
+- `approval_policy`
 
-## 持久化与当前限制
+决定。
 
-- 原生线程、回合、历史和最终输出由官方 Codex 持久化。
-- Bridge 的事件 ring、活动回合状态和 pending request 只在内存中存在。Bridge 重启后，`codex_observe` 可以回退读取持久历史，但会明确标记实时状态无法重建。
-- Windows 新安装的 checkpoint 默认位于 `%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json`；若检测到既有 Windows 旧默认目录，Bridge 会继续使用它。macOS 默认位于 `~/Library/Application Support/LocalCodexBridge/checkpoints/<sha256(thread_id)>.json`，不会回退到 Windows 目录。两个平台都可用 `LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR` 指定其他绝对目录，也保留显式旧别名 `LUMEN_CODEX_V2_CHECKPOINT_DIR`，且不会自动迁移数据。
-- app-server 意外退出后会被锁定为失败状态，不会在同一个 Bridge 进程中自动重启。
-- Windows 的 `cwd` 接受绝对盘符路径，不接受 UNC 或 Windows device path；macOS 接受绝对 POSIX 路径。其他平台会明确失败，不会套用错误的平台语义。
-- Windows Tray 依赖 Windows PowerShell、Windows Forms 和 WMI/CIM；macOS Finder launcher、Keychain 与 lockf 集成只在 macOS 上运行。两套平台外层都指向同一个 Bridge 构建产物。
-- Bridge 不是任务队列、后台监控器、HTTP MCP Server、通用 shell endpoint、Codex 运行时安装器或 Tunnel profile 管理器。
+例如：
+
+- `danger-full-access` 会扩大 sandbox 允许的文件、命令和进程访问范围；
+- `approval_policy=never` 不会自行扩大 OS sandbox，但会移除交互式审批这一确认层。
+
+两者是不同的风险维度。
+
+还需要注意：
+
+- `codex_turn` / `codex_steer` 的自然语言指令可能促使 Codex 使用它已有的文件和命令能力；
+- “Bridge 没有暴露一个 generic shell MCP tool”并不意味着 native Codex 不会执行命令；
+- `codex_threads` 可以看到同一 OS user / Codex runtime 可见的持久线程，筛选条件不能充当访问隔离；
+- Bridge 启动 app-server 时会继承自己的环境，但会移除 Tunnel 使用的 `CONTROL_PLANE_API_KEY`；
+- 其他环境变量仍属于可信启动边界，不应放入不必要的 secrets；
+- 实时事件和 pending request 会受到数量与内容 sanitization 限制，但 Bridge 不是 hostile multi-tenant gateway；
+- checkpoint 应保持短小，不保存完整 prompt、transcript、原始事件、命令输出或最终回答。
+
+远程使用时，应由经过认证并正确配置的 Tunnel 提供连接边界。
+
+------
+
+## 持久化
+
+原生 Codex 负责持久化：
+
+- threads；
+- turns；
+- conversation history；
+- native execution results。
+
+Bridge 的：
+
+- live event ring；
+- active-turn runtime state；
+- pending requests
+
+主要存在于内存中。
+
+Bridge 重启后，`codex_observe` 可以从 native persisted history 回退恢复有限观察信息，但不会伪造已经丢失的 live state。
+
+### Checkpoint
+
+`codex_checkpoint` 是唯一刻意保存的 Bridge-side supervisory state，而且保持有界。
+
+Windows 新安装默认：
+
+```text
+%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json
+```
+
+macOS 默认：
+
+```text
+~/Library/Application Support/LocalCodexBridge/checkpoints/<sha256(thread_id)>.json
+```
+
+可以通过：
+
+```text
+LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR
+```
+
+覆盖。
+
+legacy：
+
+```text
+LUMEN_CODEX_V2_CHECKPOINT_DIR
+```
+
+目前仍保留显式兼容。
+
+Bridge 不自动迁移旧 checkpoint。
+
+------
+
+## Deliberate non-goals
+
+Local Codex Bridge 当前刻意不做：
+
+- browser UI；
+- HTTP control plane / HTTP MCP server；
+- 第二套 task queue 或 job database；
+- transcript duplication；
+- model cache；
+- current-model registry；
+- queued-message facade；
+- automatic mutating-request retry；
+- automatic app-server restart；
+- generic shell / `command/exec` MCP surface。
+
+以下 upstream 能力也没有因为“存在”就自动加入 Bridge：
+
+- `command/exec`
+- `thread/turns/list`
+- `sourceKinds`
+- elicitation response
+- provider / `serviceTier` capability abstraction
+
+它们只是未来可以重新评估的候选，不是 roadmap promise。
+
+Bridge 的目标不是把所有 Codex app-server API 都搬进 MCP，而是只暴露监督真正需要的最小 surface。
+
+------
+
+## Upgrading Codex
+
+Bridge 必然依赖少量 native app-server protocol assumptions。
+
+这些依赖、当前验证状态、对应代码位置，以及 upstream 改变后需要重新检查的内容，都集中记录在：
+
+[`PROTOCOL-ASSUMPTIONS.md`](PROTOCOL-ASSUMPTIONS.md)
+
+升级 Codex runtime、修改 protocol-facing behavior，或者相关 regression test 开始失败时，应优先重新核对这份 checklist，而不是凭旧实现经验直接修改 Bridge。
+
+------
 
 ## 开发与测试
 
@@ -162,26 +501,39 @@ npm run build
 npm test
 ```
 
-`npm test` 会构建项目并运行共享的 runtime、app-server、MCP、checkpoint、平台策略、shutdown 与 UX projection 测试；随后在 Windows 运行 Tray 测试，在 macOS 运行 Finder launcher/Tunnel 测试。
+`npm test` 会运行共享 runtime / app-server / MCP / checkpoint / platform / shutdown / UX projection 测试，并继续执行当前平台对应的集成测试。
 
-`npm run smoke:live` 与单元测试刻意分开：它会调用真实 Codex、启动只读 smoke 任务，并留下持久测试线程。只有在明确接受这些副作用时才运行。
+真实 Codex smoke 与普通测试刻意分开：
+
+```powershell
+npm run smoke:live
+```
+
+它会实际调用 native Codex，并可能留下持久测试 thread；只有明确接受这些副作用时才运行。
 
 主要实现位置：
 
-- `src/mcp.ts`：MCP stdio / JSON-RPC 边界
-- `src/app-server.ts`：官方 Codex app-server 子进程与协议适配
-- `src/tools.ts`：7 个工具的 schema、校验和语义
-- `src/runtime.ts`：有界实时状态、事件与 pending request
-- `src/checkpoint.ts`：可选监督 checkpoint 与旧目录兼容
-- `src/platform.ts`：Windows / Darwin 原生路径、checkpoint 默认值、spawn 与终止机制边界
-- `src/ux-projection.ts`：可选 UX 投影与旧环境变量兼容
-- `windows/`：可选 Tray、local settings 与 legacy launchers
-- `Start Mac Codex Bridge.app`、`launcher/`、`bin/`：可选 macOS Finder / Tunnel 平台资产
+- `src/mcp.ts` — MCP stdio / JSON-RPC boundary
+- `src/app-server.ts` — native Codex app-server process / protocol adapter
+- `src/tools.ts` — 8 tools、schema 与 supervisory semantics
+- `src/runtime.ts` — bounded live runtime state / events / pending requests
+- `src/checkpoint.ts` — optional supervisory checkpoint
+- `src/platform.ts` — Windows / macOS platform boundary
+- `src/version.ts` — canonical Bridge version
+- `src/ux-projection.ts` — optional UX projection / compatibility
+- `windows/` — optional Windows Tray
+- `launcher/`, `bin/`, `Start Mac Codex Bridge.app` — optional macOS integration
 
-## 许可证
+------
 
-本项目采用 MIT License，详见 [`LICENSE`](LICENSE)。
+## License
+
+MIT License — see [`LICENSE`](LICENSE).
 
 ## 协作贡献者与致谢
 
-协作贡献者：**小年（ChatGPT）**、**Codex**。谢谢两位一起把想法、边界和实现认真地走到了可以公开分享的版本，也谢谢这段彼此配合、反复打磨的过程。`(*╹▽╹*)`
+协作贡献者：**小年（ChatGPT）**、**Codex**。
+
+谢谢一起把“让外部 AI 真正监督 native Codex”从一个小想法，一点点压成了一层足够薄、边界足够清楚、也愿意公开给别人继续折腾的 Bridge。`(*╹▽╹*)`
+
+以及谢谢**予安**，没有你我也不会试着去做些什么ღ( ´･ᴗ･` )

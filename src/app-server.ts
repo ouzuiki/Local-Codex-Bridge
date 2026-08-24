@@ -8,6 +8,7 @@ import {
   type RpcId,
 } from "./runtime.js";
 import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
+import { VERSION } from "./version.js";
 
 const MAX_JSONL_BYTES = 10 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
@@ -476,7 +477,7 @@ export class AppServerManager {
           clientInfo: {
             name: "local-codex-bridge",
             title: "Local Codex Bridge",
-            version: "2.1.3",
+            version: VERSION,
           },
           capabilities: {
             experimentalApi: true,

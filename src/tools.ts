@@ -48,10 +48,20 @@ type PublicSandboxMode = keyof typeof NATIVE_SANDBOX_POLICY_TYPE_BY_MODE;
 const SUPPORTED_RESPOND_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
+  "item/permissions/requestApproval",
   "execCommandApproval",
   "applyPatchApproval",
   "item/tool/requestUserInput",
 ]);
+
+const MODEL_LIST_PAGE_LIMIT = 100;
+const MAX_MODEL_CATALOG_PAGES = 100;
+const MAX_MODEL_CATALOG_ENTRIES = 10_000;
+
+interface ModelListPage {
+  data: Record<string, unknown>[];
+  nextCursor: string | null;
+}
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
@@ -109,10 +119,47 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "codex_models",
+    title: "Codex Models",
+    description:
+      "Read one current model/list page directly from Codex app-server. Results are bounded and sanitized, cursors are opaque, hidden models are omitted unless include_hidden is true, and the Bridge keeps no model catalog cache or current-model registry.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cursor: {
+          type: "string",
+          minLength: 1,
+          maxLength: 10000,
+          description: "Opaque cursor returned by a prior model/list call.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: MODEL_LIST_PAGE_LIMIT,
+          default: 20,
+          description: "Maximum models in the returned page.",
+        },
+        include_hidden: {
+          type: "boolean",
+          default: false,
+          description: "Request hidden models through native model/list includeHidden.",
+        },
+      },
+      additionalProperties: false,
+    },
+    annotations: {
+      title: "Codex Models",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "codex_turn",
     title: "Start or Continue Codex Turn",
     description:
-      "Start a persistent Codex thread and turn, or resume an existing thread and start a turn. Prefer continuing the same native thread when its context remains useful, but a fresh thread is allowed; thread_id is not a permanent task identity. Returns as soon as turn/start is accepted; observe separately for events and completion.",
+      "Start a persistent Codex thread and turn, or resume an existing thread and start a turn. Prefer continuing the same native thread when its context remains useful, but a fresh thread is allowed; thread_id is not a permanent task identity. Explicit model or effort overrides are validated against a fresh model/list catalog without caching. Effort alone is checked only against efforts advertised somewhere in that catalog; the Bridge does not infer the current thread model, so app-server remains authoritative for current-model compatibility. Returns as soon as turn/start is accepted; observe separately for events and completion. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -137,13 +184,13 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: "string",
           minLength: 1,
           maxLength: 100,
-          description: "Optional model identifier passed through to app-server.",
+          description: "Optional model/list id or model identifier, validated on demand and passed through unchanged.",
         },
         effort: {
           type: "string",
           minLength: 1,
           maxLength: 32,
-          description: "Optional reasoning effort passed through to turn/start.",
+          description: "Optional reasoning effort. With no model, only catalog-wide token existence is checked; current-model compatibility remains native-authoritative.",
         },
         sandbox: sandboxSchema,
         approval_policy: approvalPolicySchema,
@@ -205,7 +252,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_steer",
     title: "Steer Active Codex Turn",
     description:
-      "Append text to the same active Codex turn using turn/steer with an expected turn-id precondition. This does not create a new turn. Do not steer merely because reasoning is taking a long time or no new command has appeared; steer only for a semantic redirect or correction based on new evidence or changed user intent.",
+      "Append text to the same active Codex turn using turn/steer with an expected turn-id precondition. This does not create a new turn. Do not steer merely because reasoning is taking a long time or no new command has appeared; steer only for a semantic redirect or correction based on new evidence or changed user intent. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -233,7 +280,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_respond",
     title: "Respond to Codex Request",
     description:
-      "Answer one currently pending app-server server request by its original raw JSON-RPC id and exact thread/method scope. Supports the approval and item/tool/requestUserInput response contracts implemented by this facade. Unsupported or unknown methods fail locally and remain pending; do not guess a future response contract.",
+      "Answer one currently pending app-server server request by its original raw JSON-RPC id and exact thread/method scope. Supports stable item/commandExecution/requestApproval, item/fileChange/requestApproval, item/permissions/requestApproval, and item/tool/requestUserInput contracts, plus existing legacy execCommandApproval/applyPatchApproval compatibility. Unsupported or unknown methods fail locally and remain pending; do not guess a future response contract.",
     inputSchema: {
       type: "object",
       properties: {
@@ -267,6 +314,16 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           },
           description: "request_user_input question-id to answer-array mapping.",
         },
+        permissions: {
+          type: "object",
+          additionalProperties: true,
+          description: "Granted subset for item/permissions/requestApproval. An empty object grants none of the requested permissions.",
+        },
+        scope: {
+          type: "string",
+          enum: ["turn", "session"],
+          description: "Optional permission grant scope; omit or use turn for the current turn, or session for the session.",
+        },
         response: {
           type: "object",
           additionalProperties: true,
@@ -278,6 +335,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         { required: ["decision"] },
         { required: ["execpolicy_amendment"] },
         { required: ["answers"] },
+        { required: ["permissions"] },
         { required: ["response"] },
       ],
       additionalProperties: false,
@@ -294,7 +352,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_interrupt",
     title: "Interrupt Codex Turn",
     description:
-      "Directly request turn/interrupt for the specified active Codex thread and turn. It does not stop or restart the Bridge or Codex app-server processes.",
+      "Directly request turn/interrupt for the specified active Codex thread and turn. It does not stop or restart the Bridge or Codex app-server processes. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -492,6 +550,78 @@ function responseRecord(value: unknown, method: string): Record<string, unknown>
   return record;
 }
 
+function modelListPage(value: unknown, maximumEntries: number): ModelListPage {
+  const page = responseRecord(value, "model/list");
+  if (!Array.isArray(page.data)) {
+    throw new Error("model/list returned no data array");
+  }
+  if (page.data.length > maximumEntries) {
+    throw new Error(`model/list returned more than the requested ${maximumEntries} entries`);
+  }
+  const data = page.data.map((entry, index) => asObject(entry, `model/list data[${index}]`));
+  const rawNextCursor = page.nextCursor;
+  if (rawNextCursor === undefined || rawNextCursor === null) {
+    return { data, nextCursor: null };
+  }
+  if (
+    typeof rawNextCursor !== "string" ||
+    rawNextCursor.length === 0 ||
+    rawNextCursor.length > 10_000
+  ) {
+    throw new Error("model/list returned an invalid nextCursor");
+  }
+  return { data, nextCursor: rawNextCursor };
+}
+
+function sanitizedModelEntry(entry: Record<string, unknown>): Record<string, unknown> {
+  return asObject(
+    sanitizeForTransport(entry, {
+      maxStringChars: 4_000,
+      maxDepth: 8,
+      maxArrayItems: 40,
+      maxObjectKeys: 80,
+      totalCharBudget: 24_000,
+    }),
+    "sanitized model/list entry",
+  );
+}
+
+function modelIdentifiers(entry: Record<string, unknown>): string[] {
+  return [entry.id, entry.model].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+}
+
+function advertisedReasoningEfforts(
+  entry: Record<string, unknown>,
+): Set<string> | undefined {
+  const advertised = entry.supportedReasoningEfforts;
+  if (!Array.isArray(advertised)) {
+    return undefined;
+  }
+  const efforts = new Set<string>();
+  for (const option of advertised) {
+    if (typeof option === "string" && option.length > 0) {
+      efforts.add(option);
+      continue;
+    }
+    if (option !== null && typeof option === "object" && !Array.isArray(option)) {
+      const reasoningEffort = (option as Record<string, unknown>).reasoningEffort;
+      if (typeof reasoningEffort === "string" && reasoningEffort.length > 0) {
+        efforts.add(reasoningEffort);
+        continue;
+      }
+    }
+    return undefined;
+  }
+  return efforts;
+}
+
+function formattedEfforts(efforts: ReadonlySet<string>): string {
+  const sorted = [...efforts].sort();
+  return sorted.length > 0 ? sorted.join(", ") : "(none advertised)";
+}
+
 function extractThreadId(result: unknown, method: string): string {
   const thread = asObject(asObject(result, `${method} result`).thread, `${method} result.thread`);
   if (typeof thread.id !== "string" || thread.id.length === 0) {
@@ -590,6 +720,8 @@ export class ControlSurface {
     switch (name) {
       case "codex_threads":
         return await this.#threads(args);
+      case "codex_models":
+        return await this.#models(args);
       case "codex_turn":
         return await this.#turn(args);
       case "codex_observe":
@@ -743,6 +875,102 @@ export class ControlSurface {
     };
   }
 
+  async #models(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["cursor", "limit", "include_hidden"]);
+    const cursor = optionalString(args, "cursor", 10_000);
+    const limit = optionalInteger(args, "limit", 1, MODEL_LIST_PAGE_LIMIT) ?? 20;
+    const includeHidden = optionalBoolean(args, "include_hidden") ?? false;
+    const page = modelListPage(
+      await this.appServer.request("model/list", {
+        limit,
+        includeHidden,
+        ...(cursor ? { cursor } : {}),
+      }),
+      limit,
+    );
+    return {
+      source: "codex_app_server_model_list",
+      data: page.data.map(sanitizedModelEntry),
+      nextCursor: page.nextCursor,
+    };
+  }
+
+  async #fullModelCatalog(): Promise<Record<string, unknown>[]> {
+    const catalog: Record<string, unknown>[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < MAX_MODEL_CATALOG_PAGES; pageNumber += 1) {
+      const page = modelListPage(
+        await this.appServer.request("model/list", {
+          limit: MODEL_LIST_PAGE_LIMIT,
+          includeHidden: true,
+          ...(cursor ? { cursor } : {}),
+        }),
+        MODEL_LIST_PAGE_LIMIT,
+      );
+      catalog.push(...page.data);
+      if (catalog.length > MAX_MODEL_CATALOG_ENTRIES) {
+        throw new Error(`model/list catalog exceeded ${MAX_MODEL_CATALOG_ENTRIES} entries`);
+      }
+      if (page.nextCursor === null) {
+        return catalog;
+      }
+      if (seenCursors.has(page.nextCursor)) {
+        throw new Error("model/list pagination cursor cycle detected");
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    throw new Error(`model/list catalog exceeded ${MAX_MODEL_CATALOG_PAGES} pages`);
+  }
+
+  async #validateExecutionOverrides(
+    model: string | undefined,
+    effort: string | undefined,
+  ): Promise<void> {
+    if (!model && !effort) {
+      return;
+    }
+    const catalog = await this.#fullModelCatalog();
+    if (model) {
+      const matches = catalog.filter((entry) => modelIdentifiers(entry).includes(model));
+      if (matches.length === 0) {
+        throw new Error(
+          `Unknown model override ${JSON.stringify(model)}; current model/list catalog contains no matching id or model`,
+        );
+      }
+      if (!effort) {
+        return;
+      }
+      const advertised = matches.map(advertisedReasoningEfforts);
+      if (advertised.some((efforts) => efforts === undefined)) {
+        return;
+      }
+      const supported = new Set(advertised.flatMap((efforts) => [...efforts!]));
+      if (!supported.has(effort)) {
+        throw new Error(
+          `Unsupported effort ${JSON.stringify(effort)} for model ${JSON.stringify(model)}; advertised supportedReasoningEfforts: ${formattedEfforts(supported)}`,
+        );
+      }
+      return;
+    }
+
+    const advertised = new Set<string>();
+    for (const entry of catalog) {
+      const efforts = advertisedReasoningEfforts(entry);
+      if (efforts) {
+        for (const candidate of efforts) {
+          advertised.add(candidate);
+        }
+      }
+    }
+    if (!advertised.has(effort!)) {
+      throw new Error(
+        `Unknown effort override ${JSON.stringify(effort)}; it is absent from all advertised supportedReasoningEfforts in the current model/list catalog. The Bridge does not infer the current thread model. Advertised efforts: ${formattedEfforts(advertised)}`,
+      );
+    }
+  }
+
   async #turn(args: Record<string, unknown>): Promise<unknown> {
     onlyKeys(args, ["text", "thread_id", "cwd", "model", "effort", "sandbox", "approval_policy"]);
     const text = requiredString(args, "text");
@@ -757,6 +985,7 @@ export class ControlSurface {
     const effort = optionalString(args, "effort", 32);
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
     const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
+    await this.#validateExecutionOverrides(model, effort);
     const overrides = {
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
@@ -873,6 +1102,8 @@ export class ControlSurface {
       "decision",
       "execpolicy_amendment",
       "answers",
+      "permissions",
+      "scope",
       "response",
     ]);
     const requestIdValue = args.request_id;
@@ -894,14 +1125,45 @@ export class ControlSurface {
     const decision = enumValue(args, "decision", ["accept", "acceptForSession", "decline", "cancel"] as const);
     const amendment = args.execpolicy_amendment;
     const answers = args.answers;
+    const permissions = args.permissions;
+    const scope = enumValue(args, "scope", ["turn", "session"] as const);
     const generic = args.response;
-    const supplied = [decision !== undefined, amendment !== undefined, answers !== undefined, generic !== undefined].filter(Boolean).length;
-    if (supplied !== 1) {
-      throw new Error("Provide exactly one of decision, execpolicy_amendment, answers, or response");
+
+    let response: Record<string, unknown> | undefined;
+    if (method === "item/permissions/requestApproval") {
+      if (permissions === undefined) {
+        throw new Error("item/permissions/requestApproval requires permissions");
+      }
+      if (
+        decision !== undefined ||
+        amendment !== undefined ||
+        answers !== undefined ||
+        generic !== undefined
+      ) {
+        throw new Error("item/permissions/requestApproval accepts only permissions and optional scope");
+      }
+      response = {
+        permissions: asObject(permissions, "permissions"),
+        ...(scope ? { scope } : {}),
+      };
+    } else {
+      if (permissions !== undefined || scope !== undefined) {
+        throw new Error("permissions and scope are valid only for item/permissions/requestApproval");
+      }
+      const supplied = [
+        decision !== undefined,
+        amendment !== undefined,
+        answers !== undefined,
+        generic !== undefined,
+      ].filter(Boolean).length;
+      if (supplied !== 1) {
+        throw new Error("Provide exactly one of decision, execpolicy_amendment, answers, or response");
+      }
     }
 
-    let response: Record<string, unknown>;
-    if (
+    if (method === "item/permissions/requestApproval") {
+      // The exact stable response object was constructed above.
+    } else if (
       method === "item/commandExecution/requestApproval" ||
       method === "item/fileChange/requestApproval" ||
       method === "execCommandApproval" ||
@@ -952,6 +1214,9 @@ export class ControlSurface {
         throw new Error("This request method requires a generic response object");
       }
       response = asObject(generic, "response");
+    }
+    if (!response) {
+      throw new Error(`No response contract was constructed for ${method}`);
     }
 
     const pending = this.appServer.runtime.claimPending(requestId, {

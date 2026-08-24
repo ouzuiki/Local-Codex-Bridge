@@ -1,5 +1,6 @@
 import { sanitizeForTransport, type RpcId } from "./runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS, TOOL_NAMES } from "./tools.js";
+import { VERSION } from "./version.js";
 
 const JSONRPC_VERSION = "2.0";
 const LATEST_PROTOCOL_VERSION = "2025-11-25";
@@ -289,7 +290,7 @@ export class McpStdioServer {
         serverInfo: {
           name: "local-codex-bridge",
           title: "Local Codex Bridge",
-          version: "2.1.3",
+          version: VERSION,
         },
       };
       this.#initializeCompatibility = compatibility;

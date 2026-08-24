@@ -202,6 +202,289 @@ test("codex_turn fails closed before turn/start for unusable returned sandbox po
   }
 });
 
+test("codex_models maps one bounded native page and preserves sanitized future fields", async () => {
+  const manager = new StubAppServerManager((method) => {
+    assert.equal(method, "model/list");
+    return {
+      data: [{
+        id: "model-id",
+        model: "model-native",
+        displayName: "Model Display",
+        hidden: false,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }],
+        upgrade: "upgrade-id",
+        upgradeInfo: { message: "Upgrade available" },
+        inputModalities: ["text", "image"],
+        supportsPersonality: true,
+        isDefault: true,
+        futureCapability: { mode: "preserved" },
+      }],
+      nextCursor: "next-opaque",
+    };
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  const result = object(await surface.call("codex_models", {
+    limit: 3,
+    cursor: "current-opaque",
+    include_hidden: true,
+  }));
+
+  assert.deepEqual(manager.requests, [{
+    method: "model/list",
+    params: { limit: 3, includeHidden: true, cursor: "current-opaque" },
+  }]);
+  assert.equal(result.source, "codex_app_server_model_list");
+  assert.equal(result.nextCursor, "next-opaque");
+  const entries = result.data as Array<Record<string, unknown>>;
+  assert.equal(entries[0]?.model, "model-native");
+  assert.deepEqual(entries[0]?.futureCapability, { mode: "preserved" });
+});
+
+test("ordinary codex_turn continuation omits model and effort without listing models", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "thread/resume") {
+      return { thread: { id: "thread-existing" } };
+    }
+    if (method === "turn/start") {
+      return { turn: { id: "turn-existing", status: "inProgress" } };
+    }
+    throw new Error(`unexpected request ${method}`);
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await surface.call("codex_turn", { text: "continue", thread_id: "thread-existing" });
+
+  assert.deepEqual(manager.requests.map((request) => request.method), ["thread/resume", "turn/start"]);
+  for (const request of manager.requests) {
+    const params = object(request.params);
+    assert.equal("model" in params, false);
+    assert.equal("effort" in params, false);
+  }
+});
+
+test("explicit hidden model is found through cycle-safe pagination and passed through unchanged", async () => {
+  const manager = new StubAppServerManager((method, params) => {
+    if (method === "model/list") {
+      return object(params).cursor === undefined
+        ? { data: [{ id: "visible", model: "visible-native", hidden: false }], nextCursor: "page-2" }
+        : { data: [{ id: "hidden-id", model: "hidden-native", hidden: true }], nextCursor: null };
+    }
+    if (method === "thread/resume") {
+      return { thread: { id: "thread-hidden" } };
+    }
+    if (method === "turn/start") {
+      return { turn: { id: "turn-hidden", status: "inProgress" } };
+    }
+    throw new Error(`unexpected request ${method}`);
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await surface.call("codex_turn", {
+    text: "hidden model",
+    thread_id: "thread-hidden",
+    model: "hidden-id",
+  });
+
+  assert.deepEqual(manager.requests.map((request) => request.method), [
+    "model/list",
+    "model/list",
+    "thread/resume",
+    "turn/start",
+  ]);
+  assert.deepEqual(object(manager.requests[0]?.params), { limit: 100, includeHidden: true });
+  assert.deepEqual(object(manager.requests[1]?.params), {
+    limit: 100,
+    includeHidden: true,
+    cursor: "page-2",
+  });
+  assert.equal(object(manager.requests[2]?.params).model, "hidden-id");
+  assert.equal(object(manager.requests[3]?.params).model, "hidden-id");
+});
+
+test("explicit model overrides reject unknown models before thread mutation", async () => {
+  const manager = new StubAppServerManager((method) => {
+    assert.equal(method, "model/list");
+    return { data: [{ id: "known", model: "known-native" }], nextCursor: null };
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await assert.rejects(
+    surface.call("codex_turn", {
+      text: "unknown model",
+      thread_id: "thread-known",
+      model: "missing",
+    }),
+    /Unknown model override "missing"/,
+  );
+  assert.deepEqual(manager.requests.map((request) => request.method), ["model/list"]);
+});
+
+test("model plus effort validates advertised support and passes exact tokens", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "model/list") {
+      return {
+        data: [{
+          id: "reasoning-model",
+          model: "reasoning-native",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low", description: "Fast" },
+            { reasoningEffort: "high", description: "Deep" },
+          ],
+        }],
+        nextCursor: null,
+      };
+    }
+    if (method === "thread/resume") {
+      return { thread: { id: "thread-reasoning" } };
+    }
+    if (method === "turn/start") {
+      return { turn: { id: "turn-reasoning", status: "inProgress" } };
+    }
+    throw new Error(`unexpected request ${method}`);
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await surface.call("codex_turn", {
+    text: "supported effort",
+    thread_id: "thread-reasoning",
+    model: "reasoning-native",
+    effort: "high",
+  });
+
+  assert.equal(object(manager.requests[1]?.params).model, "reasoning-native");
+  assert.equal(object(manager.requests[2]?.params).model, "reasoning-native");
+  assert.equal(object(manager.requests[2]?.params).effort, "high");
+});
+
+test("model plus effort rejects unsupported advertised effort but tolerates absent support data", async (t) => {
+  await t.test("advertised unsupported", async () => {
+    const manager = new StubAppServerManager((method) => {
+      assert.equal(method, "model/list");
+      return {
+        data: [{
+          id: "bounded-model",
+          supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
+        }],
+        nextCursor: null,
+      };
+    });
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await assert.rejects(
+      surface.call("codex_turn", {
+        text: "unsupported effort",
+        thread_id: "thread-bounded",
+        model: "bounded-model",
+        effort: "high",
+      }),
+      /Unsupported effort "high" for model "bounded-model".*medium/,
+    );
+    assert.deepEqual(manager.requests.map((request) => request.method), ["model/list"]);
+  });
+
+  await t.test("support field absent", async () => {
+    const manager = new StubAppServerManager((method) => {
+      if (method === "model/list") {
+        return { data: [{ id: "native-authoritative" }], nextCursor: null };
+      }
+      if (method === "thread/resume") {
+        return { thread: { id: "thread-native" } };
+      }
+      if (method === "turn/start") {
+        return { turn: { id: "turn-native", status: "inProgress" } };
+      }
+      throw new Error(`unexpected request ${method}`);
+    });
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await surface.call("codex_turn", {
+      text: "native decides",
+      thread_id: "thread-native",
+      model: "native-authoritative",
+      effort: "future-effort",
+    });
+    assert.equal(object(manager.requests[2]?.params).effort, "future-effort");
+  });
+});
+
+test("effort-only validation uses the catalog-wide advertised union without inferring a model", async (t) => {
+  await t.test("advertised somewhere passes through", async () => {
+    const manager = new StubAppServerManager((method) => {
+      if (method === "model/list") {
+        return {
+          data: [
+            { id: "model-a", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+            { id: "model-b", supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
+          ],
+          nextCursor: null,
+        };
+      }
+      if (method === "thread/resume") {
+        return { thread: { id: "thread-effort" } };
+      }
+      if (method === "turn/start") {
+        return { turn: { id: "turn-effort", status: "inProgress" } };
+      }
+      throw new Error(`unexpected request ${method}`);
+    });
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await surface.call("codex_turn", {
+      text: "effort only",
+      thread_id: "thread-effort",
+      effort: "xhigh",
+    });
+    assert.equal("model" in object(manager.requests[1]?.params), false);
+    assert.equal("model" in object(manager.requests[2]?.params), false);
+    assert.equal(object(manager.requests[2]?.params).effort, "xhigh");
+  });
+
+  await t.test("absent everywhere rejects before mutation", async () => {
+    const manager = new StubAppServerManager((method) => {
+      assert.equal(method, "model/list");
+      return {
+        data: [{ id: "model-only", supportedReasoningEfforts: [
+          { reasoningEffort: "low" },
+          { reasoningEffort: "medium" },
+        ] }],
+        nextCursor: null,
+      };
+    });
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await assert.rejects(
+      surface.call("codex_turn", {
+        text: "unknown effort",
+        thread_id: "thread-effort",
+        effort: "impossible",
+      }),
+      /absent from all advertised supportedReasoningEfforts.*does not infer the current thread model.*low, medium/,
+    );
+    assert.deepEqual(manager.requests.map((request) => request.method), ["model/list"]);
+  });
+});
+
+test("model catalog pagination cycles fail locally before thread mutation", async () => {
+  let page = 0;
+  const manager = new StubAppServerManager((method) => {
+    assert.equal(method, "model/list");
+    page += 1;
+    return {
+      data: [{ id: `other-${page}` }],
+      nextCursor: "repeat-cursor",
+    };
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await assert.rejects(
+    surface.call("codex_turn", {
+      text: "cycle",
+      thread_id: "thread-cycle",
+      model: "missing",
+    }),
+    /pagination cursor cycle detected/,
+  );
+  assert.deepEqual(manager.requests.map((request) => request.method), ["model/list", "model/list"]);
+});
+
 test("public tool schemas expose the same string bounds already enforced at runtime", () => {
   const expected: Array<[string, string, number]> = [
     ["codex_threads", "thread_id", 200],
