@@ -145,7 +145,7 @@ test("codex_turn uses the newly resolved policy when the same thread changes san
   assert.strictEqual(object(manager.requests[3]?.params).sandboxPolicy, readOnlyPolicy);
 });
 
-test("codex_turn omits turn-level sandboxPolicy when sandbox was not requested", async () => {
+test("codex_turn omission requires no effective sandbox or approval-policy readback", async () => {
   const manager = new StubAppServerManager((method) => {
     if (method === "thread/start") {
       return {
@@ -162,8 +162,116 @@ test("codex_turn omits turn-level sandboxPolicy when sandbox was not requested",
 
   await surface.call("codex_turn", { text: "default sandbox", cwd: "D:\\work" });
 
+  assert.deepEqual(manager.requests.map((request) => request.method), ["thread/start", "turn/start"]);
   assert.equal("sandbox" in object(manager.requests[0]?.params), false);
+  assert.equal("approvalPolicy" in object(manager.requests[0]?.params), false);
   assert.equal("sandboxPolicy" in object(manager.requests[1]?.params), false);
+  assert.equal("approvalPolicy" in object(manager.requests[1]?.params), false);
+});
+
+test("codex_turn verifies and forwards matching native effective approval policies", async (t) => {
+  const approvalPolicies = ["untrusted", "on-request", "never"] as const;
+
+  for (const approvalPolicy of approvalPolicies) {
+    await t.test(approvalPolicy, async () => {
+      const manager = new StubAppServerManager((method) => {
+        if (method === "thread/start") {
+          return {
+            thread: { id: `thread-${approvalPolicy}` },
+            approvalPolicy,
+          };
+        }
+        if (method === "turn/start") {
+          return { turn: { id: `turn-${approvalPolicy}`, status: "inProgress" } };
+        }
+        throw new Error(`unexpected request ${method}`);
+      });
+      const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+      await surface.call("codex_turn", {
+        text: "explicit approval policy",
+        cwd: "D:\\work",
+        approval_policy: approvalPolicy,
+      });
+
+      assert.deepEqual(manager.requests.map((request) => request.method), [
+        "thread/start",
+        "turn/start",
+      ]);
+      assert.equal(object(manager.requests[0]?.params).approvalPolicy, approvalPolicy);
+      assert.equal(object(manager.requests[1]?.params).approvalPolicy, approvalPolicy);
+    });
+  }
+});
+
+test("codex_turn verifies the effective approval policy returned by thread/resume", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "thread/resume") {
+      return { thread: { id: "thread-existing-approval" }, approvalPolicy: "never" };
+    }
+    if (method === "turn/start") {
+      return { turn: { id: "turn-existing-approval", status: "inProgress" } };
+    }
+    throw new Error(`unexpected request ${method}`);
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  await surface.call("codex_turn", {
+    text: "explicit resumed approval policy",
+    thread_id: "thread-existing-approval",
+    approval_policy: "never",
+  });
+
+  assert.deepEqual(manager.requests.map((request) => request.method), [
+    "thread/resume",
+    "turn/start",
+  ]);
+  assert.equal(object(manager.requests[0]?.params).approvalPolicy, "never");
+  assert.equal(object(manager.requests[1]?.params).approvalPolicy, "never");
+});
+
+test("codex_turn fails before turn/start for unusable or mismatched effective approval policies", async (t) => {
+  const invalidPolicies: Array<{
+    name: string;
+    includeApprovalPolicy: boolean;
+    value?: unknown;
+  }> = [
+    { name: "missing", includeApprovalPolicy: false },
+    { name: "non-string", includeApprovalPolicy: true, value: 17 },
+    {
+      name: "granular object",
+      includeApprovalPolicy: true,
+      value: { granular: { commandExecution: "on-request" } },
+    },
+    { name: "compatibility alias", includeApprovalPolicy: true, value: "on-failure" },
+    { name: "unrecognized", includeApprovalPolicy: true, value: "future-policy" },
+    { name: "mismatched", includeApprovalPolicy: true, value: "on-request" },
+  ];
+
+  for (const invalid of invalidPolicies) {
+    await t.test(invalid.name, async () => {
+      const manager = new StubAppServerManager((method) => {
+        if (method !== "thread/start") {
+          throw new Error(`unexpected request ${method}`);
+        }
+        return {
+          thread: { id: "thread-invalid-approval" },
+          ...(invalid.includeApprovalPolicy ? { approvalPolicy: invalid.value } : {}),
+        };
+      });
+      const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+      await assert.rejects(
+        surface.call("codex_turn", {
+          text: "must not start",
+          cwd: "D:\\work",
+          approval_policy: "never",
+        }),
+        /approvalPolicy/,
+      );
+      assert.deepEqual(manager.requests.map((request) => request.method), ["thread/start"]);
+    });
+  }
 });
 
 test("codex_turn fails closed before turn/start for unusable returned sandbox policies", async (t) => {

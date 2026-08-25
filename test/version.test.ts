@@ -52,4 +52,9 @@ test("release version anchors match the canonical code version", () => {
     new RegExp(`当前公开版本为 \\*\\*V${escapedVersion}\\*\\*`),
     "CHANGELOG current-version marker drifted",
   );
+  assert.match(
+    changelog,
+    new RegExp(`^## V${escapedVersion}[^\\r\\n]*\\r?\\n\\r?\\n- `, "m"),
+    "CHANGELOG has no populated section heading for the canonical version",
+  );
 });

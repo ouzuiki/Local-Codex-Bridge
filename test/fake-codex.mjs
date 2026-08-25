@@ -52,13 +52,24 @@ lines.on("line", (line) => {
       result: {
         thread: { id: currentThread, cwd: message.params.cwd },
         ...(policyType ? { sandbox: { type: policyType } } : {}),
+        ...(message.params.approvalPolicy
+          ? { approvalPolicy: message.params.approvalPolicy }
+          : {}),
       },
     });
     return;
   }
   if (message.method === "thread/resume") {
     currentThread = message.params.threadId;
-    send({ id: message.id, result: { thread: { id: currentThread } } });
+    send({
+      id: message.id,
+      result: {
+        thread: { id: currentThread },
+        ...(message.params.approvalPolicy
+          ? { approvalPolicy: message.params.approvalPolicy }
+          : {}),
+      },
+    });
     return;
   }
   if (message.method === "turn/start") {

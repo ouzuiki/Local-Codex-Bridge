@@ -45,6 +45,14 @@ const NATIVE_SANDBOX_POLICY_TYPE_BY_MODE = {
 
 type PublicSandboxMode = keyof typeof NATIVE_SANDBOX_POLICY_TYPE_BY_MODE;
 
+const NATIVE_APPROVAL_POLICIES = new Set([
+  "untrusted",
+  "on-request",
+  "never",
+]);
+
+type PublicApprovalPolicy = "untrusted" | "on-request" | "never";
+
 const SUPPORTED_RESPOND_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -656,6 +664,30 @@ function extractSandboxPolicy(
   return policy;
 }
 
+function extractApprovalPolicy(
+  result: unknown,
+  method: string,
+  requestedApprovalPolicy: PublicApprovalPolicy,
+): PublicApprovalPolicy {
+  const effectiveApprovalPolicy = asObject(result, `${method} result`).approvalPolicy;
+  if (typeof effectiveApprovalPolicy !== "string") {
+    throw new Error(
+      `${method} returned no usable effective approvalPolicy for requested ${requestedApprovalPolicy}`,
+    );
+  }
+  if (!NATIVE_APPROVAL_POLICIES.has(effectiveApprovalPolicy)) {
+    throw new Error(
+      `${method} returned unrecognized effective approvalPolicy ${JSON.stringify(effectiveApprovalPolicy)}`,
+    );
+  }
+  if (effectiveApprovalPolicy !== requestedApprovalPolicy) {
+    throw new Error(
+      `${method} returned effective approvalPolicy ${JSON.stringify(effectiveApprovalPolicy)} for requested ${JSON.stringify(requestedApprovalPolicy)}`,
+    );
+  }
+  return effectiveApprovalPolicy;
+}
+
 function storedTerminal(threadResult: unknown): unknown {
   const result = asObject(threadResult, "thread/read result");
   const thread = asObject(result.thread, "thread/read result.thread");
@@ -1010,6 +1042,9 @@ export class ControlSurface {
     const sandboxPolicy = sandbox
       ? extractSandboxPolicy(threadResult, threadMethod, sandbox)
       : undefined;
+    const effectiveApprovalPolicy = approvalPolicy
+      ? extractApprovalPolicy(threadResult, threadMethod, approvalPolicy)
+      : undefined;
     this.appServer.runtime.ensureThread(threadId);
     const turnResult = await this.appServer.request("turn/start", {
       threadId,
@@ -1018,7 +1053,7 @@ export class ControlSurface {
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
       ...(sandboxPolicy ? { sandboxPolicy } : {}),
-      ...(approvalPolicy ? { approvalPolicy } : {}),
+      ...(effectiveApprovalPolicy ? { approvalPolicy: effectiveApprovalPolicy } : {}),
     });
     const turnId = extractTurnId(turnResult, "turn/start");
     this.appServer.runtime.markTurnAccepted(threadId, turnId);

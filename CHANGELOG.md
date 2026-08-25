@@ -2,6 +2,14 @@
 
 本文件只记录当前公共仓库 Git 历史中可以核验的事实。当前公开版本为 **V2.1.3**；公共历史中没有单独的 V2.1.0 发布记录。
 
+## V2.1.3（2026-08-24）
+
+- 新增第 8 个公开工具 `codex_models`：按需读取有界的原生 `model/list` 页面；显式 model/effort override 使用新鲜、有界且防游标循环的 catalog 校验，不建立 Bridge 模型缓存或当前模型状态。
+- 将公共运行与测试基线扩展为 Windows 和 macOS、Node.js 24+，保留各平台原生路径与精确子进程生命周期边界；CI 在 Windows 与 macOS 上执行等价验证。
+- 对显式 sandbox 与 approval policy 使用 `thread/start` / `thread/resume` 返回的原生有效 policy 做失败关闭核验；省略 override 时保持原生默认，不增加 Bridge 状态或额外读取。
+- 将缺失有效 status 的 `turn/completed` 保守投影为 `unknown`，并把流式 agent 文本保留改为有界尾部，避免丢失最终结论。
+- 补充原生 app-server 硬依赖清单与版本锚点校验；V2.1.3 必须存在对应的 CHANGELOG 版本章节。
+
 ## V2.1.2（2026-08-12）
 
 - 对已经发送但确认超时的原生变更请求保留有界的晚到响应上下文；晚到成功或错误会成为已清理、可观察的运行时证据，并以保守规则对账，不自动重试，也不覆盖更新的活动回合或终态。

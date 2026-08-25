@@ -1,6 +1,7 @@
 export type RpcId = string | number;
 
 export const MAX_OBSERVE_WAIT_MS = 10_000;
+export const MAX_STREAMED_AGENT_TEXT_CHARS = 48_000;
 
 import type {
   UxCounts,
@@ -176,6 +177,29 @@ function truncateString(value: string, maxChars: number): string {
     prefix = prefix.slice(0, -1);
   }
   return `${prefix}\u2026 [truncated ${value.length - prefix.length} chars]`;
+}
+
+function stringTail(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  let start = value.length - maxChars;
+  const first = value.charCodeAt(start);
+  if (first >= 0xdc00 && first <= 0xdfff) {
+    start += 1;
+  }
+  return value.slice(start);
+}
+
+function appendStreamedAgentTextTail(current: string, delta: string): string {
+  if (delta.length >= MAX_STREAMED_AGENT_TEXT_CHARS) {
+    return stringTail(delta, MAX_STREAMED_AGENT_TEXT_CHARS);
+  }
+  const retainedCurrent = stringTail(
+    current,
+    MAX_STREAMED_AGENT_TEXT_CHARS - delta.length,
+  );
+  return retainedCurrent + delta;
 }
 
 export function sanitizeForTransport(
@@ -536,9 +560,9 @@ export class RuntimeStore {
     const agentText = extractAgentText(method, params);
     if (agentText !== undefined) {
       if (method.endsWith("/delta")) {
-        runtime.agentText = truncateString(runtime.agentText + agentText, 48_000);
+        runtime.agentText = appendStreamedAgentTextTail(runtime.agentText, agentText);
       } else {
-        runtime.agentText = truncateString(agentText, 48_000);
+        runtime.agentText = truncateString(agentText, MAX_STREAMED_AGENT_TEXT_CHARS);
       }
     }
 
@@ -546,7 +570,7 @@ export class RuntimeStore {
       const turn = asRecord(asRecord(params)?.turn);
       const terminalTurnId = stringField(turn, "id") ?? turnId ?? runtime.activeTurnId;
       if (terminalTurnId) {
-        const status = stringField(turn, "status") ?? "completed";
+        const status = stringField(turn, "status") ?? "unknown";
         const error = turn?.error ?? null;
         const final = extractFinalFromTurn(params) ?? (runtime.agentText || null);
         runtime.status = status;

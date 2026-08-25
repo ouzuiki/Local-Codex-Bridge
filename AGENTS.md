@@ -56,7 +56,7 @@ Prefer evidence from the current source, tests, package metadata, and actual mac
 A rebuild or install should demonstrate, as applicable:
 
 - dependency installation, type checking, build, and the regular automated test suite succeed;
-- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the seven intended tools;
+- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the eight intended tools;
 - the official app-server executable is resolved and launched with the expected stdio arguments;
 - persistent native history and ephemeral Bridge state remain clearly separated;
 - no author-specific path, credential, Tunnel profile, port, or secret has entered the repository or generic setup;

@@ -5,6 +5,7 @@ import test from "node:test";
 import type { AppServerManager } from "../src/app-server.js";
 import {
   MAX_OBSERVE_WAIT_MS,
+  MAX_STREAMED_AGENT_TEXT_CHARS,
   RuntimeStore,
   sanitizeForTransport,
   type RuntimeObservation,
@@ -109,6 +110,69 @@ test("runtime ring uses monotonic cursors, scopes pending raw ids, and captures 
   assert.equal(observed.events.length, 2);
   assert.equal(observed.terminal?.final_result, "DONE");
   assert.equal(observed.runtime_status, "completed");
+});
+
+test("turn/completed without a usable status projects unknown", () => {
+  const runtime = new RuntimeStore();
+  runtime.markTurnAccepted("thread-unknown", "turn-unknown");
+
+  runtime.recordNotification("turn/completed", {
+    threadId: "thread-unknown",
+    turn: { id: "turn-unknown", items: [] },
+  });
+
+  const observed = runtime.observe("thread-unknown", 0, 10)!;
+  assert.equal(observed.runtime_status, "unknown");
+  assert.equal(observed.terminal?.status, "unknown");
+});
+
+test("streamed agent text stays unchanged under its bound and retains the tail over it", () => {
+  const underBound = new RuntimeStore();
+  underBound.markTurnAccepted("thread-under", "turn-under");
+  underBound.recordNotification("item/agentMessage/delta", {
+    threadId: "thread-under",
+    turnId: "turn-under",
+    delta: "answer: ",
+  });
+  underBound.recordNotification("item/agentMessage/delta", {
+    threadId: "thread-under",
+    turnId: "turn-under",
+    delta: "FINAL_CONCLUSION",
+  });
+  underBound.recordNotification("turn/completed", {
+    threadId: "thread-under",
+    turn: { id: "turn-under", status: "completed", items: [] },
+  });
+  assert.equal(
+    underBound.observe("thread-under", 0, 10)?.terminal?.final_result,
+    "answer: FINAL_CONCLUSION",
+  );
+
+  const overBound = new RuntimeStore();
+  const conclusion = "FINAL_CONCLUSION";
+  overBound.markTurnAccepted("thread-over", "turn-over");
+  overBound.recordNotification("item/agentMessage/delta", {
+    threadId: "thread-over",
+    turnId: "turn-over",
+    delta: "x".repeat(MAX_STREAMED_AGENT_TEXT_CHARS),
+  });
+  overBound.recordNotification("item/agentMessage/delta", {
+    threadId: "thread-over",
+    turnId: "turn-over",
+    delta: conclusion,
+  });
+  overBound.recordNotification("turn/completed", {
+    threadId: "thread-over",
+    turn: { id: "turn-over", status: "completed", items: [] },
+  });
+
+  const retained = overBound.observe("thread-over", 0, 10)?.terminal?.final_result;
+  assert.equal(retained?.length, MAX_STREAMED_AGENT_TEXT_CHARS);
+  assert.equal(retained?.endsWith(conclusion), true);
+  assert.equal(
+    retained,
+    `${"x".repeat(MAX_STREAMED_AGENT_TEXT_CHARS - conclusion.length)}${conclusion}`,
+  );
 });
 
 test("pending app-server request ids preserve typed identity and cannot be replaced while responding", () => {
