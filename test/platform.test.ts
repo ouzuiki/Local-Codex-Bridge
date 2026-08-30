@@ -5,6 +5,7 @@ import test from "node:test";
 import { terminateAppServerChild } from "../src/app-server.js";
 import {
   DARWIN_PLATFORM_POLICY,
+  LINUX_PLATFORM_POLICY,
   createWindowsPlatformPolicy,
   platformPolicyFor,
   type ManagedChildProcess,
@@ -12,7 +13,7 @@ import {
 } from "../src/platform.js";
 import { TOOL_DEFINITIONS } from "../src/tools.js";
 
-test("Windows and Darwin cwd policies are explicit peers", () => {
+test("Windows, Darwin, and Linux cwd policies are explicit peers", () => {
   const windows = createWindowsPlatformPolicy(() => ({ status: 0 }));
   assert.equal(windows.validateCwd("D:/Bridge/project"), "D:\\Bridge\\project");
   assert.throws(() => windows.validateCwd("relative\\path"), /drive-letter/);
@@ -27,6 +28,16 @@ test("Windows and Darwin cwd policies are explicit peers", () => {
     () => DARWIN_PLATFORM_POLICY.validateCwd("Users/example/bridge"),
     /absolute POSIX path on macOS/,
   );
+
+  assert.equal(
+    LINUX_PLATFORM_POLICY.validateCwd("/home/example/../bridge"),
+    "/home/bridge",
+  );
+  assert.throws(
+    () => LINUX_PLATFORM_POLICY.validateCwd("home/example/bridge"),
+    /absolute POSIX path on Linux/,
+  );
+  assert.equal(platformPolicyFor("linux"), LINUX_PLATFORM_POLICY);
 });
 
 test("checkpoint defaults remain platform-native and Windows alone preserves its legacy default", () => {
@@ -61,6 +72,31 @@ test("checkpoint defaults remain platform-native and Windows alone preserves its
       "/Users/example",
     ),
     "/Users/example/Library/Application Support/LocalCodexBridge/checkpoints",
+  );
+
+  assert.equal(
+    LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
+      { XDG_STATE_HOME: "/var/lib/example-state" },
+      "/home/example",
+    ),
+    "/var/lib/example-state/LocalCodexBridge/checkpoints",
+  );
+
+  assert.equal(
+    LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
+      {},
+      "/home/example",
+    ),
+    "/home/example/.local/state/LocalCodexBridge/checkpoints",
+  );
+
+  assert.throws(
+    () =>
+      LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
+        { XDG_STATE_HOME: "relative/state" },
+        "/home/example",
+      ),
+    /absolute XDG state directory/,
   );
 });
 
@@ -121,10 +157,29 @@ test("spawn and termination mechanisms stay platform-specific", () => {
   assert.deepEqual(DARWIN_PLATFORM_POLICY.appServerSpawnOptions(), {
     shell: false,
   });
+
+  const linuxSignals: Array<NodeJS.Signals | number | undefined> = [];
+  const linuxChild: ManagedChildProcess = {
+    pid: 5353,
+    exitCode: null,
+    signalCode: null,
+    kill: (signal) => {
+      linuxSignals.push(signal);
+      return true;
+    },
+  };
+
+  LINUX_PLATFORM_POLICY.softTerminateChild(linuxChild);
+  LINUX_PLATFORM_POLICY.hardTerminateChild(linuxChild);
+
+  assert.deepEqual(linuxSignals, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(LINUX_PLATFORM_POLICY.appServerSpawnOptions(), {
+    shell: false,
+  });
 });
 
 test("unsupported platforms fail clearly and cwd tool schema wording stays native", () => {
-  assert.throws(() => platformPolicyFor("linux"), /Unsupported platform linux/);
+  assert.throws(() => platformPolicyFor("freebsd"), /Unsupported platform freebsd/);
   for (const toolName of ["codex_threads", "codex_turn"]) {
     const tool = TOOL_DEFINITIONS.find(({ name }) => name === toolName);
     const properties = tool?.inputSchema.properties as

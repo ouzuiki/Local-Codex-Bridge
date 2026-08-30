@@ -16,9 +16,12 @@ if (process.platform === "win32") {
 } else if (process.platform === "darwin") {
   executable = process.execPath;
   args = ["--test", "dist/test/launcher.test.js"];
+} else if (process.platform === "linux") {
+  executable = process.execPath;
+  args = ["--test", "dist/test/platform.test.js"];
 } else {
   throw new Error(
-    `Unsupported platform ${process.platform}; platform tests require Windows or macOS`,
+    `Unsupported platform ${process.platform}; platform tests require Windows, macOS, or Linux`,
   );
 }
 

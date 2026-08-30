@@ -2,7 +2,7 @@ import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-export type SupportedPlatform = "win32" | "darwin";
+export type SupportedPlatform = "win32" | "darwin" | "linux";
 
 export interface ManagedChildProcess {
   readonly pid?: number | undefined;
@@ -66,6 +66,16 @@ function validateDarwinCwd(value: string): string {
   return path.posix.normalize(value);
 }
 
+function validateLinuxCwd(value: string): string {
+  if (value.includes("\0")) {
+    throw new Error("cwd contains a NUL character");
+  }
+  if (!path.posix.isAbsolute(value)) {
+    throw new Error("cwd must be an absolute POSIX path on Linux");
+  }
+  return path.posix.normalize(value);
+}
+
 function normalizeWindowsExplicitCheckpointDirectory(value: string): string {
   if (!path.win32.isAbsolute(value)) {
     throw new Error("Explicit checkpoint directory must be an absolute Windows path");
@@ -76,6 +86,13 @@ function normalizeWindowsExplicitCheckpointDirectory(value: string): string {
 function normalizeDarwinExplicitCheckpointDirectory(value: string): string {
   if (!path.posix.isAbsolute(value)) {
     throw new Error("Explicit checkpoint directory must be an absolute POSIX path on macOS");
+  }
+  return path.posix.resolve(value);
+}
+
+function normalizeLinuxExplicitCheckpointDirectory(value: string): string {
+  if (!path.posix.isAbsolute(value)) {
+    throw new Error("Explicit checkpoint directory must be an absolute POSIX path on Linux");
   }
   return path.posix.resolve(value);
 }
@@ -114,6 +131,36 @@ function defaultDarwinCheckpointDirectory(
     homeDirectory,
     "Library",
     "Application Support",
+    "LocalCodexBridge",
+    "checkpoints",
+  );
+}
+
+function defaultLinuxCheckpointDirectory(
+  environment: NodeJS.ProcessEnv,
+  homeDirectory: string,
+): string {
+  const xdgStateHome = environment.XDG_STATE_HOME?.trim();
+
+  if (xdgStateHome) {
+    if (!path.posix.isAbsolute(xdgStateHome)) {
+      throw new Error("Unable to resolve an absolute XDG state directory for checkpoints");
+    }
+    return path.posix.join(
+      xdgStateHome,
+      "LocalCodexBridge",
+      "checkpoints",
+    );
+  }
+
+  if (!path.posix.isAbsolute(homeDirectory)) {
+    throw new Error("Unable to resolve an absolute Linux home directory for checkpoints");
+  }
+
+  return path.posix.join(
+    homeDirectory,
+    ".local",
+    "state",
     "LocalCodexBridge",
     "checkpoints",
   );
@@ -177,6 +224,22 @@ export const DARWIN_PLATFORM_POLICY: PlatformPolicy = {
   },
 };
 
+export const LINUX_PLATFORM_POLICY: PlatformPolicy = {
+  platform: "linux",
+  nativeCwdDescription: "absolute POSIX path on Linux",
+  validateCwd: validateLinuxCwd,
+  normalizeExplicitCheckpointDirectory: normalizeLinuxExplicitCheckpointDirectory,
+  resolveDefaultCheckpointDirectory: defaultLinuxCheckpointDirectory,
+  appServerSpawnOptions: () => ({ shell: false }),
+  hasChildExited: childHasExited,
+  softTerminateChild: (child) => {
+    child.kill("SIGTERM");
+  },
+  hardTerminateChild: (child) => {
+    child.kill("SIGKILL");
+  },
+};
+
 export function platformPolicyFor(
   platform: NodeJS.Platform = process.platform,
 ): PlatformPolicy {
@@ -186,7 +249,10 @@ export function platformPolicyFor(
   if (platform === "darwin") {
     return DARWIN_PLATFORM_POLICY;
   }
+  if (platform === "linux") {
+    return LINUX_PLATFORM_POLICY;
+  }
   throw new Error(
-    `Unsupported platform ${platform}; Local Codex Bridge supports Windows and macOS only`,
+    `Unsupported platform ${platform}; Local Codex Bridge supports Windows, macOS, and Linux`,
   );
 }
