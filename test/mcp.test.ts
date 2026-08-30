@@ -118,7 +118,7 @@ async function initialize(client: TestClient, id: RpcId): Promise<void> {
   assert.equal(response.error, undefined);
 }
 
-test("MCP stdio initializes idempotently and lists exactly eight fully annotated tools", async () => {
+test("MCP stdio initializes idempotently and lists exactly nine fully annotated tools", async () => {
   const client = new TestClient();
   try {
     const initializeLine = JSON.stringify({
@@ -191,6 +191,7 @@ test("MCP stdio initializes idempotently and lists exactly eight fully annotated
     assert.deepEqual(tools.map((tool) => tool.name), [
       "codex_threads",
       "codex_models",
+      "codex_rate_limits",
       "codex_turn",
       "codex_observe",
       "codex_steer",
@@ -213,6 +214,12 @@ test("MCP stdio initializes idempotently and lists exactly eight fully annotated
       .properties as Record<string, unknown>;
     assert.ok("cursor" in modelProperties);
     assert.ok("include_hidden" in modelProperties);
+    const rateLimitsTool = tools.find((tool) => tool.name === "codex_rate_limits");
+    assert.match(rateLimitsTool?.description as string, /account\/rateLimits\/read/);
+    assert.equal(
+      (rateLimitsTool?.annotations as Record<string, unknown>).readOnlyHint,
+      true,
+    );
     const respondTool = tools.find((tool) => tool.name === "codex_respond");
     assert.equal(
       (respondTool?.annotations as Record<string, unknown>).idempotentHint,

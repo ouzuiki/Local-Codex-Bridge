@@ -65,6 +65,8 @@ const SUPPORTED_RESPOND_METHODS = new Set([
 const MODEL_LIST_PAGE_LIMIT = 100;
 const MAX_MODEL_CATALOG_PAGES = 100;
 const MAX_MODEL_CATALOG_ENTRIES = 10_000;
+const MAX_RATE_LIMIT_ENTRIES = 100;
+const MAX_RESET_CREDIT_ENTRIES = 20;
 
 interface ModelListPage {
   data: Record<string, unknown>[];
@@ -161,6 +163,24 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: false,
+    },
+  },
+  {
+    name: "codex_rate_limits",
+    title: "Codex Rate Limits",
+    description:
+      "Read current ChatGPT Codex quota state directly through account/rateLimits/read. This read-only path starts no native thread or turn and invokes no model. Results are normalized, bounded, and sanitized; opaque reset-credit IDs are omitted.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    annotations: {
+      title: "Codex Rate Limits",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
     },
   },
   {
@@ -594,6 +614,216 @@ function sanitizedModelEntry(entry: Record<string, unknown>): Record<string, unk
   );
 }
 
+function nullableBoundedString(value: unknown, label: string): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "string" || value.length > 4_000) {
+    throw new Error(`${label} returned an invalid string`);
+  }
+  const sanitized = sanitizeForTransport(value, {
+    maxStringChars: 4_000,
+    totalCharBudget: 4_000,
+  });
+  return typeof sanitized === "string" ? sanitized : null;
+}
+
+function nullableBoolean(value: unknown, label: string): boolean | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`${label} returned an invalid boolean`);
+  }
+  return value;
+}
+
+function finiteNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${label} returned an invalid number`);
+  }
+  return value;
+}
+
+function normalizedRateWindow(value: unknown, label: string): Record<string, unknown> | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const window = asObject(value, label);
+  const usedPercent = Math.min(100, Math.max(0, finiteNumber(window.usedPercent, `${label}.usedPercent`)));
+  const windowDurationMins = finiteNumber(
+    window.windowDurationMins,
+    `${label}.windowDurationMins`,
+  );
+  const resetsAt = finiteNumber(window.resetsAt, `${label}.resetsAt`);
+  if (windowDurationMins < 0 || resetsAt < 0) {
+    throw new Error(`${label} returned an invalid window boundary`);
+  }
+  return {
+    usedPercent,
+    remainingPercent: 100 - usedPercent,
+    windowDurationMins,
+    resetsAt,
+  };
+}
+
+function sanitizedCredits(value: unknown): unknown {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  return sanitizeForTransport(value, {
+    maxStringChars: 1_000,
+    maxDepth: 5,
+    maxArrayItems: 20,
+    maxObjectKeys: 30,
+    totalCharBudget: 8_000,
+  });
+}
+
+function normalizedRateLimit(
+  value: unknown,
+  label: string,
+  fallbackLimitId?: string,
+): Record<string, unknown> {
+  const limit = asObject(value, label);
+  const rawLimitId = limit.limitId ?? fallbackLimitId;
+  if (typeof rawLimitId !== "string" || rawLimitId.length === 0 || rawLimitId.length > 200) {
+    throw new Error(`${label}.limitId returned an invalid string`);
+  }
+  return {
+    limitId: rawLimitId,
+    limitName: nullableBoundedString(limit.limitName, `${label}.limitName`),
+    planType: nullableBoundedString(limit.planType, `${label}.planType`),
+    rateLimitReachedType: nullableBoundedString(
+      limit.rateLimitReachedType,
+      `${label}.rateLimitReachedType`,
+    ),
+    spendControlReached: nullableBoolean(
+      limit.spendControlReached,
+      `${label}.spendControlReached`,
+    ),
+    credits: sanitizedCredits(limit.credits),
+    primary: normalizedRateWindow(limit.primary, `${label}.primary`),
+    secondary: normalizedRateWindow(limit.secondary, `${label}.secondary`),
+  };
+}
+
+function normalizedResetCredit(value: unknown, index: number): Record<string, unknown> {
+  const credit = asObject(value, `account/rateLimits/read rateLimitResetCredits.credits[${index}]`);
+  const output: Record<string, unknown> = {};
+  for (const key of [
+    "resetType",
+    "status",
+    "grantedAt",
+    "expiresAt",
+    "title",
+    "description",
+  ] as const) {
+    const field = credit[key];
+    if (field === undefined) {
+      continue;
+    }
+    if (
+      field !== null &&
+      typeof field !== "string" &&
+      (typeof field !== "number" || !Number.isFinite(field)) &&
+      typeof field !== "boolean"
+    ) {
+      throw new Error(`account/rateLimits/read reset credit ${key} is invalid`);
+    }
+    output[key] = field;
+  }
+  return asObject(
+    sanitizeForTransport(output, {
+      maxStringChars: 1_000,
+      maxDepth: 3,
+      maxArrayItems: 1,
+      maxObjectKeys: 10,
+      totalCharBudget: 4_000,
+    }),
+    "sanitized account/rateLimits/read reset credit",
+  );
+}
+
+function normalizedRateLimitsResponse(value: unknown): Record<string, unknown> {
+  const response = responseRecord(value, "account/rateLimits/read");
+  const rawMap = response.rateLimitsByLimitId === undefined
+    ? undefined
+    : asObject(response.rateLimitsByLimitId, "account/rateLimits/read rateLimitsByLimitId");
+  const rawMain = response.rateLimits ?? rawMap?.codex;
+  if (rawMain === undefined || rawMain === null) {
+    throw new Error("account/rateLimits/read returned no rateLimits object");
+  }
+  const main = normalizedRateLimit(rawMain, "account/rateLimits/read rateLimits", "codex");
+  const entries = rawMap ? Object.entries(rawMap) : [[String(main.limitId), rawMain] as const];
+  const normalizedMap = Object.create(null) as Record<string, unknown>;
+  for (const [limitId, rawLimit] of entries.slice(0, MAX_RATE_LIMIT_ENTRIES)) {
+    if (limitId.length === 0 || limitId.length > 200) {
+      throw new Error("account/rateLimits/read returned an invalid limit id");
+    }
+    normalizedMap[limitId] = normalizedRateLimit(
+      rawLimit,
+      `account/rateLimits/read rateLimitsByLimitId.${limitId}`,
+      limitId,
+    );
+  }
+
+  let rateLimitResetCredits: Record<string, unknown> | null = null;
+  if (response.rateLimitResetCredits !== undefined && response.rateLimitResetCredits !== null) {
+    const resetCredits = asObject(
+      response.rateLimitResetCredits,
+      "account/rateLimits/read rateLimitResetCredits",
+    );
+    const availableCount = finiteNumber(
+      resetCredits.availableCount,
+      "account/rateLimits/read rateLimitResetCredits.availableCount",
+    );
+    if (!Number.isInteger(availableCount) || availableCount < 0) {
+      throw new Error("account/rateLimits/read returned an invalid reset-credit count");
+    }
+    if (
+      resetCredits.credits !== undefined &&
+      resetCredits.credits !== null &&
+      !Array.isArray(resetCredits.credits)
+    ) {
+      throw new Error("account/rateLimits/read returned invalid reset-credit details");
+    }
+    const detailRows = Array.isArray(resetCredits.credits)
+      ? resetCredits.credits.slice(0, MAX_RESET_CREDIT_ENTRIES).map(normalizedResetCredit)
+      : null;
+    rateLimitResetCredits = {
+      availableCount,
+      credits: detailRows,
+      ...(Array.isArray(resetCredits.credits) && resetCredits.credits.length > MAX_RESET_CREDIT_ENTRIES
+        ? { truncatedCreditCount: resetCredits.credits.length - MAX_RESET_CREDIT_ENTRIES }
+        : {}),
+    };
+  }
+
+  return {
+    source: "codex_app_server_rate_limits",
+    planType: nullableBoundedString(
+      response.planType ?? main.planType,
+      "account/rateLimits/read planType",
+    ),
+    rateLimitReachedType: nullableBoundedString(
+      response.rateLimitReachedType ?? main.rateLimitReachedType,
+      "account/rateLimits/read rateLimitReachedType",
+    ),
+    spendControlReached: nullableBoolean(
+      response.spendControlReached ?? main.spendControlReached,
+      "account/rateLimits/read spendControlReached",
+    ),
+    credits: sanitizedCredits(response.credits ?? main.credits),
+    rateLimits: main,
+    rateLimitsByLimitId: normalizedMap,
+    ...(entries.length > MAX_RATE_LIMIT_ENTRIES
+      ? { truncatedLimitCount: entries.length - MAX_RATE_LIMIT_ENTRIES }
+      : {}),
+    rateLimitResetCredits,
+  };
+}
+
 function modelIdentifiers(entry: Record<string, unknown>): string[] {
   return [entry.id, entry.model].filter(
     (value): value is string => typeof value === "string" && value.length > 0,
@@ -754,6 +984,8 @@ export class ControlSurface {
         return await this.#threads(args);
       case "codex_models":
         return await this.#models(args);
+      case "codex_rate_limits":
+        return await this.#rateLimits(args);
       case "codex_turn":
         return await this.#turn(args);
       case "codex_observe":
@@ -925,6 +1157,13 @@ export class ControlSurface {
       data: page.data.map(sanitizedModelEntry),
       nextCursor: page.nextCursor,
     };
+  }
+
+  async #rateLimits(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, []);
+    return normalizedRateLimitsResponse(
+      await this.appServer.request("account/rateLimits/read", {}),
+    );
   }
 
   async #fullModelCatalog(): Promise<Record<string, unknown>[]> {

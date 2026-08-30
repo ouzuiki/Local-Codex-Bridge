@@ -31,6 +31,7 @@ test("checkpoint remains the final tool in the current tool catalog", () => {
   assert.deepEqual(TOOL_DEFINITIONS.map((tool) => tool.name), [
     "codex_threads",
     "codex_models",
+    "codex_rate_limits",
     "codex_turn",
     "codex_observe",
     "codex_steer",

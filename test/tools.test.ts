@@ -350,6 +350,104 @@ test("codex_models maps one bounded native page and preserves sanitized future f
   assert.deepEqual(entries[0]?.futureCapability, { mode: "preserved" });
 });
 
+test("codex_rate_limits directly reads, normalizes, bounds, and sanitizes quota state", async () => {
+  const manager = new StubAppServerManager((method, params) => {
+    assert.equal(method, "account/rateLimits/read");
+    assert.deepEqual(params, {});
+    return {
+      planType: "plus",
+      spendControlReached: false,
+      credits: { balance: 12, accessToken: "must-not-leak" },
+      rateLimits: {
+        limitId: "codex",
+        limitName: null,
+        planType: "plus",
+        rateLimitReachedType: null,
+        primary: { usedPercent: -5, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+        secondary: { usedPercent: 125, windowDurationMins: 10_080, resetsAt: 1_800_100_000 },
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: "codex",
+          primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+          secondary: null,
+        },
+        future_meter: {
+          limitId: "future_meter",
+          limitName: "Future meter",
+          rateLimitReachedType: "futureState",
+          primary: { usedPercent: 40.5, windowDurationMins: 60, resetsAt: 1_800_200_000 },
+          secondary: null,
+        },
+      },
+      rateLimitResetCredits: {
+        availableCount: 1,
+        credits: [{
+          id: "RateLimitResetCredit_internal",
+          resetType: "codexRateLimits",
+          status: "available",
+          grantedAt: 1_799_000_000,
+          expiresAt: null,
+          title: "Reset credit",
+          description: "Bearer abcdefghijklmnop",
+        }],
+      },
+      accountToken: "must-not-leak",
+    };
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+
+  const result = object(await surface.call("codex_rate_limits", {}));
+
+  assert.deepEqual(manager.requests.map((request) => request.method), [
+    "account/rateLimits/read",
+  ]);
+  assert.equal(result.source, "codex_app_server_rate_limits");
+  assert.equal(result.planType, "plus");
+  assert.equal(result.spendControlReached, false);
+  assert.deepEqual(result.credits, { balance: 12, accessToken: "[REDACTED]" });
+  const main = object(result.rateLimits);
+  assert.deepEqual(main.primary, {
+    usedPercent: 0,
+    remainingPercent: 100,
+    windowDurationMins: 300,
+    resetsAt: 1_800_000_000,
+  });
+  assert.deepEqual(main.secondary, {
+    usedPercent: 100,
+    remainingPercent: 0,
+    windowDurationMins: 10_080,
+    resetsAt: 1_800_100_000,
+  });
+  const limits = object(result.rateLimitsByLimitId);
+  assert.ok("future_meter" in limits);
+  assert.equal(object(object(limits.future_meter).primary).remainingPercent, 59.5);
+  const resetCredits = object(result.rateLimitResetCredits);
+  assert.equal(resetCredits.availableCount, 1);
+  const resetDetails = resetCredits.credits as Array<Record<string, unknown>>;
+  assert.equal("id" in resetDetails[0]!, false);
+  assert.equal(resetDetails[0]?.description, "Bearer [REDACTED]");
+  assert.equal("accountToken" in result, false);
+});
+
+test("codex_rate_limits rejects malformed and upstream error responses without starting work", async (t) => {
+  await t.test("malformed response", async () => {
+    const manager = new StubAppServerManager(() => ({ rateLimits: { limitId: "codex", primary: "bad" } }));
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await assert.rejects(surface.call("codex_rate_limits", {}), /primary must be an object/);
+    assert.deepEqual(manager.requests.map((request) => request.method), ["account/rateLimits/read"]);
+  });
+
+  await t.test("JSON-RPC error", async () => {
+    const manager = new StubAppServerManager(() => {
+      throw new Error("Codex app-server account/rateLimits/read failed: unsupported");
+    });
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await assert.rejects(surface.call("codex_rate_limits", {}), /unsupported/);
+    assert.deepEqual(manager.requests.map((request) => request.method), ["account/rateLimits/read"]);
+  });
+});
+
 test("ordinary codex_turn continuation omits model and effort without listing models", async () => {
   const manager = new StubAppServerManager((method) => {
     if (method === "thread/resume") {
