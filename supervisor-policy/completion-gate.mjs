@@ -25,7 +25,7 @@ const ALLOWED = Object.freeze({
   memory: new Set(["recorded", "not_needed", "record_required", "record_failed"]),
   commit: new Set(["created", "not_needed", "pending"]),
   push: new Set(["pushed", "not_needed", "pending"]),
-  tree: new Set(["clean", "dirty", "unknown"]),
+  tree: new Set(["clean", "dirty", "unknown", "not_applicable"]),
 });
 
 const PASSING = Object.freeze({
@@ -38,7 +38,6 @@ const PASSING = Object.freeze({
   memory: new Set(["recorded", "not_needed"]),
   commit: new Set(["created", "not_needed"]),
   push: new Set(["pushed", "not_needed"]),
-  tree: new Set(["clean"]),
 });
 
 function requireObject(value, label) {
@@ -55,6 +54,13 @@ function requireStage(stage) {
   return stage;
 }
 
+function requireWorkspaceKind(workspaceKind) {
+  if (workspaceKind !== "working_tree" && workspaceKind !== "remote_only") {
+    throw new TypeError("workspace_kind must be working_tree or remote_only");
+  }
+  return workspaceKind;
+}
+
 function validateEvidence(evidence, fields) {
   const value = requireObject(evidence, "evidence");
   for (const field of fields) {
@@ -68,7 +74,7 @@ function validateEvidence(evidence, fields) {
   return value;
 }
 
-function blockerFor(field, status) {
+function blockerFor(field, status, workspaceKind) {
   switch (field) {
     case "acceptance":
       return status === "rejected" ? "acceptance_rejected" : "acceptance_not_verified";
@@ -89,28 +95,51 @@ function blockerFor(field, status) {
     case "push":
       return "push_not_completed";
     case "tree":
+      if (workspaceKind === "remote_only" && status !== "not_applicable") {
+        return "remote_only_tree_status_must_be_not_applicable";
+      }
+      if (workspaceKind === "working_tree" && status === "not_applicable") {
+        return "working_tree_cannot_be_not_applicable";
+      }
       return status === "dirty" ? "working_tree_dirty" : "working_tree_not_verified_clean";
     default:
       return `${field}_unresolved`;
   }
 }
 
-export function evaluateCompletionGate({ stage = "pre_commit", evidence } = {}) {
+function treePasses(status, workspaceKind) {
+  return workspaceKind === "remote_only" ? status === "not_applicable" : status === "clean";
+}
+
+export function evaluateCompletionGate({
+  stage = "pre_commit",
+  workspace_kind = "working_tree",
+  evidence,
+} = {}) {
   const normalizedStage = requireStage(stage);
+  const normalizedWorkspaceKind = requireWorkspaceKind(workspace_kind);
   const fields = normalizedStage === "pre_commit" ? PRE_COMMIT_REQUIRED : FINAL_REQUIRED;
   const normalizedEvidence = validateEvidence(evidence, fields);
   const blockers = [];
 
   for (const field of fields) {
     const status = normalizedEvidence[field];
-    if (!PASSING[field].has(status)) {
-      blockers.push({ field, status, reason: blockerFor(field, status) });
+    const passes = field === "tree"
+      ? treePasses(status, normalizedWorkspaceKind)
+      : PASSING[field].has(status);
+    if (!passes) {
+      blockers.push({
+        field,
+        status,
+        reason: blockerFor(field, status, normalizedWorkspaceKind),
+      });
     }
   }
 
   if (blockers.length > 0) {
     return {
       stage: normalizedStage,
+      workspace_kind: normalizedWorkspaceKind,
       ready: false,
       action: "blocked",
       blockers,
@@ -119,6 +148,7 @@ export function evaluateCompletionGate({ stage = "pre_commit", evidence } = {}) 
 
   return {
     stage: normalizedStage,
+    workspace_kind: normalizedWorkspaceKind,
     ready: true,
     action: normalizedStage === "pre_commit" ? "ready_for_commit" : "close_task",
     blockers: [],
