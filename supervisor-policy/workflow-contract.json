@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "owner": "supervisor",
+  "name": "Tri-Bridge Workflow Automation v1",
+  "as_of": "2026-09-04",
+  "steps": [
+    "task_intake",
+    "memory_recall_assessment",
+    "worker_selection",
+    "execution_supervision",
+    "acceptance_verification",
+    "repo_and_docs_assessment",
+    "memory_record_assessment",
+    "commit",
+    "push",
+    "working_tree_clean_verification",
+    "close"
+  ],
+  "policy_bindings": {
+    "memory_recall_assessment": "supervisor-policy/memory-policy.mjs#evaluateRecallPolicy",
+    "worker_selection": "supervisor-policy/policy.mjs#selectWorker",
+    "execution_supervision": "TRI-BRIDGE-CONTRACT-V1.md#Worker-neutral-Control-Contract-v1",
+    "acceptance_verification": "Supervisor responsibility under TRI-BRIDGE-CONTRACT-V1.md",
+    "repo_and_docs_assessment": "supervisor-policy/completion-gate.mjs#evaluateCompletionGate(pre_commit)",
+    "memory_record_assessment": "supervisor-policy/memory-policy.mjs#evaluateRecordPolicy",
+    "commit": "Supervisor-authorized repository action",
+    "push": "Supervisor-authorized repository action",
+    "working_tree_clean_verification": "supervisor-policy/completion-gate.mjs#evaluateCompletionGate(final)",
+    "close": "Only after final Completion Gate passes"
+  }
+}
