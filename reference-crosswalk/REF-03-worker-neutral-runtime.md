@@ -22,8 +22,8 @@ Microsoft Agent Framework workflows provide a real workflow runtime: executors, 
 | stable core contracts across runtimes | Anthropic yes | Tri-Bridge Contract v1 | `MATCH` |
 | runtime-specific adapters | Anthropic yes | LCB / LPB / LClB | `MATCH` conceptually |
 | deterministic safety/business gates outside model discretion | Anthropic yes | Supervisor/Bridge/native safety boundaries | `MATCH` |
-| worker-selection policy | orchestrator/runtime can own | P2 pure function | `OURS_THINNER` / intentional |
-| completion workflow | workflow engine could own | P3 evidence gate | `OURS_THINNER` / intentional |
+| worker-selection policy | orchestrator/runtime can own | P2 pure function | `INTENTIONAL_ASYMMETRY` |
+| completion workflow | workflow engine could own | P3 evidence gate | `INTENTIONAL_ASYMMETRY` |
 | cross-session project memory | runtime may integrate | TencentDB advisory layer | `INTENTIONAL_ASYMMETRY` |
 
 **REF-03A decision:** Current system does not require or implement a worker-neutral runtime. `PASS`.
