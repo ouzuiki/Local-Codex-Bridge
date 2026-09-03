@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export type RpcId = string | number;
 
 export const MAX_OBSERVE_WAIT_MS = 10_000;
@@ -24,6 +26,20 @@ export interface RuntimeEvent {
   category: EventCategory;
   turn_id?: string;
   data: unknown;
+}
+
+export interface ProjectedRuntimeEvent extends RuntimeEvent {
+  schema_version: 1;
+  stream_id: string;
+  event_id: string;
+  worker: "codex";
+  source: "lcb.codex-app-server";
+  type: string;
+  native_type: string;
+  observed_at: string;
+  occurred_at: null;
+  scope: { thread_id: string; turn_id?: string };
+  transport: { bounded: true; sanitized: true };
 }
 
 export interface PendingServerRequest {
@@ -79,6 +95,7 @@ export interface TerminalSnapshot {
 
 interface ThreadRuntime {
   threadId: string;
+  streamId: string;
   activeTurnId: string | null;
   status: string;
   revision: number;
@@ -92,7 +109,10 @@ export interface RuntimeObservation {
   runtime_available: true;
   runtime_status: string;
   active_turn_id: string | null;
-  events: RuntimeEvent[];
+  stream_id: string;
+  requested_stream_id: string | null;
+  stream_changed: boolean;
+  events: ProjectedRuntimeEvent[];
   next_cursor: number;
   current_cursor: number;
   cursor_floor: number;
@@ -295,6 +315,43 @@ function idKey(id: RpcId): string {
   return `${typeof id}:${String(id)}`;
 }
 
+function normalizeEventType(method: string): string {
+  const normalized = method
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, ".")
+    .replace(/\.+/g, ".")
+    .replace(/^\.|\.$/g, "");
+  return `codex.${normalized || "native_event"}`;
+}
+
+function pendingKind(method: string): "action_approval" | "permission_grant" | "user_input" | "unknown" {
+  if (method === "item/commandExecution/requestApproval" ||
+      method === "item/fileChange/requestApproval" ||
+      method === "execCommandApproval" ||
+      method === "applyPatchApproval") return "action_approval";
+  if (method === "item/permissions/requestApproval") return "permission_grant";
+  if (method === "item/tool/requestUserInput") return "user_input";
+  return "unknown";
+}
+
+function pendingResponseContract(method: string): unknown {
+  const kind = pendingKind(method);
+  if (kind === "action_approval") {
+    return {
+      type: "action_decision",
+      allowed_decisions: ["accept", "acceptForSession", "decline", "cancel"],
+      execpolicy_amendment: method === "item/commandExecution/requestApproval" || method === "execCommandApproval",
+    };
+  }
+  if (kind === "permission_grant") {
+    return { type: "permission_grant", allowed_scopes: ["turn", "session"] };
+  }
+  if (kind === "user_input") {
+    return { type: "user_input", accepts: ["answers", "response"] };
+  }
+  return null;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -383,6 +440,7 @@ export class RuntimeStore {
     if (!this.#threads.has(threadId)) {
       this.#threads.set(threadId, {
         threadId,
+        streamId: randomUUID(),
         activeTurnId: null,
         status: "idle",
         revision: 0,
@@ -731,6 +789,7 @@ export class RuntimeStore {
     threadId: string,
     cursor: number | undefined,
     limit: number,
+    streamId?: string,
   ): RuntimeObservation | null {
     const runtime = this.#threads.get(threadId);
     if (!runtime) {
@@ -739,21 +798,39 @@ export class RuntimeStore {
     const current = runtime.nextCursor - 1;
     const firstAvailable = runtime.events[0]?.cursor ?? runtime.nextCursor;
     const requested = cursor ?? firstAvailable - 1;
-    const cursorLost = requested < firstAvailable - 1;
+    const streamChanged = streamId !== undefined && streamId !== runtime.streamId;
+    const cursorLost = streamChanged || requested < firstAvailable - 1;
     const effective = cursorLost ? firstAvailable - 1 : requested;
     const available = runtime.events.filter((event) => event.cursor > effective);
-    const events = available.slice(0, limit);
-    const nextCursor = events.at(-1)?.cursor ?? Math.min(Math.max(effective, 0), current);
+    const rawEvents = available.slice(0, limit);
+    const events: ProjectedRuntimeEvent[] = rawEvents.map((event) => ({
+      ...event,
+      schema_version: 1,
+      stream_id: runtime.streamId,
+      event_id: `${runtime.streamId}:${event.cursor}`,
+      worker: "codex",
+      source: "lcb.codex-app-server",
+      type: normalizeEventType(event.method),
+      native_type: event.method,
+      observed_at: event.at,
+      occurred_at: null,
+      scope: { thread_id: threadId, ...(event.turn_id ? { turn_id: event.turn_id } : {}) },
+      transport: { bounded: true, sanitized: true },
+    }));
+    const nextCursor = rawEvents.at(-1)?.cursor ?? Math.min(Math.max(effective, 0), current);
     return {
       runtime_available: true,
       runtime_status: runtime.status,
       active_turn_id: runtime.activeTurnId,
+      stream_id: runtime.streamId,
+      requested_stream_id: streamId ?? null,
+      stream_changed: streamChanged,
       events,
       next_cursor: nextCursor,
       current_cursor: current,
       cursor_floor: Math.max(0, firstAvailable - 1),
       cursor_lost: cursorLost,
-      has_more: available.length > events.length,
+      has_more: available.length > rawEvents.length,
       pending_requests: this.pendingForThread(threadId),
       terminal: runtime.terminal,
     };
@@ -765,6 +842,7 @@ export class RuntimeStore {
     limit: number,
     waitMs: number,
     signal?: AbortSignal,
+    streamId?: string,
   ): Promise<RuntimeObservation | null> {
     if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > MAX_OBSERVE_WAIT_MS) {
       throw new Error(`wait_ms must be an integer from 0 to ${MAX_OBSERVE_WAIT_MS}`);
@@ -774,7 +852,7 @@ export class RuntimeStore {
       return null;
     }
     const revision = runtime.revision;
-    const initial = this.observe(threadId, cursor, limit);
+    const initial = this.observe(threadId, cursor, limit, streamId);
     if (
       initial === null ||
       waitMs === 0 ||
@@ -788,21 +866,41 @@ export class RuntimeStore {
     }
 
     await this.#waitForChange(runtime, revision, waitMs, signal);
-    return this.observe(threadId, cursor, limit);
+    return this.observe(threadId, cursor, limit, streamId);
   }
 
   pendingForThread(threadId: string): unknown[] {
     return [...this.#pending.values()]
       .filter((request) => request.threadId === threadId)
       .sort((left, right) => left.receivedAt.localeCompare(right.receivedAt))
-      .map((request) => ({
-        request_id: request.rawId,
-        method: request.method,
-        thread_id: request.threadId,
-        turn_id: request.turnId ?? null,
-        received_at: request.receivedAt,
-        params: request.params,
-      }));
+      .map((request) => {
+        const kind = pendingKind(request.method);
+        return {
+          schema_version: 1,
+          request_id: request.rawId,
+          worker: "codex",
+          kind,
+          native_method: request.method,
+          blocking: true,
+          created_at: request.receivedAt,
+          expires_at: null,
+          failure_policy: "none",
+          scope: {
+            thread_id: request.threadId,
+            ...(request.turnId ? { turn_id: request.turnId } : {}),
+            native_request_ref: request.rawId,
+          },
+          presentation: { method: request.method },
+          payload: request.params,
+          response_contract: pendingResponseContract(request.method),
+          // Legacy compatibility fields retained during Contract v1 migration.
+          method: request.method,
+          thread_id: request.threadId,
+          turn_id: request.turnId ?? null,
+          received_at: request.receivedAt,
+          params: request.params,
+        };
+      });
   }
 
   clearPendingForThread(threadId: string, turnId?: string): void {

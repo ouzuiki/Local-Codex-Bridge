@@ -249,6 +249,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           minimum: 0,
           description: "Return runtime events with a cursor greater than this value.",
         },
+        stream_id: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description: "Optional stream identity from a prior observe. A mismatch is disclosed as stream_changed/cursor_lost.",
+        },
         limit: {
           type: "integer",
           minimum: 1,
@@ -1308,14 +1314,15 @@ export class ControlSurface {
 
   async #observe(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     throwIfAborted(signal);
-    onlyKeys(args, ["thread_id", "cursor", "limit", "wait_ms"]);
+    onlyKeys(args, ["thread_id", "cursor", "stream_id", "limit", "wait_ms"]);
     const threadId = requiredString(args, "thread_id", 200);
     const cursor = optionalInteger(args, "cursor", 0, Number.MAX_SAFE_INTEGER);
+    const streamId = optionalString(args, "stream_id", 200);
     const limit = optionalInteger(args, "limit", 1, 100) ?? 50;
     const waitMs = optionalInteger(args, "wait_ms", 0, MAX_OBSERVE_WAIT_MS) ?? 0;
     const runtime = waitMs === 0
-      ? this.appServer.runtime.observe(threadId, cursor, limit)
-      : await this.appServer.runtime.observeWithWait(threadId, cursor, limit, waitMs, signal);
+      ? this.appServer.runtime.observe(threadId, cursor, limit, streamId)
+      : await this.appServer.runtime.observeWithWait(threadId, cursor, limit, waitMs, signal, streamId);
     throwIfAborted(signal);
     if (runtime) {
       return runtime;
@@ -1332,6 +1339,9 @@ export class ControlSurface {
       note: "This Bridge process has no in-memory runtime for the thread. Live event ring and pending requests cannot be reconstructed after process loss.",
       runtime_status: "not_reconstructable",
       active_turn_id: null,
+      stream_id: null,
+      requested_stream_id: streamId ?? null,
+      stream_changed: streamId !== undefined,
       events: [],
       next_cursor: 0,
       current_cursor: 0,
@@ -1511,6 +1521,9 @@ export class ControlSurface {
     this.appServer.runtime.completePending(pending);
     return {
       responded: true,
+      acknowledgement: "accepted",
+      resolution: "submitted",
+      worker: "codex",
       request_id: requestId,
       thread_id: threadId,
       turn_id: pending.turnId ?? null,
