@@ -46,6 +46,7 @@ test("P3 completion gate freezes the intended completion order", () => {
 test("pre-commit gate opens only after verification, tests, diff, docs and memory assessment", () => {
   assert.deepEqual(evaluateCompletionGate({ stage: "pre_commit", evidence: readyPreCommit }), {
     stage: "pre_commit",
+    workspace_kind: "working_tree",
     ready: true,
     action: "ready_for_commit",
     blockers: [],
@@ -79,6 +80,7 @@ test("tests may be explicitly not required but never implicitly skipped", () => 
 test("final completion requires commit/push resolution and a verified clean tree", () => {
   assert.deepEqual(evaluateCompletionGate({ stage: "final", evidence: readyFinal }), {
     stage: "final",
+    workspace_kind: "working_tree",
     ready: true,
     action: "close_task",
     blockers: [],
