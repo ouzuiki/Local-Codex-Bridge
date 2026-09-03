@@ -69,13 +69,18 @@ permission timeout/client disconnect even though the broker had
 already failed closed and removed the native request.
 ```
 
-This was repaired at the LClB current-state projection seam only:
+It was repaired and hardened at the LClB current-state projection seam only:
 
 ```text
-3e6ce9adbb4cfdec55120e5d00bf3c0e260f9bc9
-00c76d04f115f6e433c76176d245b33e013d8db9
-234e20bc189e8d2023ec09a9d02502779e56447f
+3e6ce9adbb4cfdec55120e5d00bf3c0e260f9bc9  pending-set change publication
+00c76d04f115f6e433c76176d245b33e013d8db9  authoritative runner projection
+73b936fdbd222916840446641242c24b5fa5b641  preserve stdin drain/backpressure semantics
+3e38f10a42ec3a794060bbcc25084db8218e05ca  focused timeout regression
+721f3b661a52eeefb5b54b76cb9181bf09bf333b  remove temporary repair workflow
+234e20bc189e8d2023ec09a9d02502779e56447f  timeout + disconnect regression hardening
 ```
+
+The intermediate stdin-drain correction is included explicitly because the REF repair itself must not regress unrelated native transport semantics.
 
 No shared contract revision and no new runtime dependency were needed.
 
