@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import workflowContract from "./workflow-contract.json" with { type: "json" };
 import { completionGateOrder, evaluateCompletionGate } from "./completion-gate.mjs";
 import {
   DURABLE_MEMORY_CATEGORIES,
@@ -26,6 +27,22 @@ const readyFinal = Object.freeze({
   commit: "created",
   push: "pushed",
   tree: "clean",
+});
+
+test("P3 canonical Supervisor workflow order is frozen", () => {
+  assert.deepEqual(workflowContract.steps, [
+    "task_intake",
+    "memory_recall_assessment",
+    "worker_selection",
+    "execution_supervision",
+    "acceptance_verification",
+    "repo_and_docs_assessment",
+    "memory_record_assessment",
+    "commit",
+    "push",
+    "repository_final_state_verification",
+    "close",
+  ]);
 });
 
 test("P3 completion gate freezes the intended completion order", () => {
