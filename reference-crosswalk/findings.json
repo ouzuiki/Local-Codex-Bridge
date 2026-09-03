@@ -29,9 +29,13 @@
       "repair_commits": [
         "3e6ce9adbb4cfdec55120e5d00bf3c0e260f9bc9",
         "00c76d04f115f6e433c76176d245b33e013d8db9",
+        "73b936fdbd222916840446641242c24b5fa5b641",
+        "3e38f10a42ec3a794060bbcc25084db8218e05ca",
+        "721f3b661a52eeefb5b54b76cb9181bf09bf333b",
         "234e20bc189e8d2023ec09a9d02502779e56447f"
       ],
-      "contract_change": false
+      "contract_change": false,
+      "new_runtime_dependency": false
     },
     {
       "id": "REF-04C-DURABLE-RESUME",
@@ -97,6 +101,7 @@
     "blocking_gaps_remaining": 0,
     "unknown_findings_remaining": 0,
     "tri_bridge_contract_changes": 0,
+    "new_generic_harness_dependencies": 0,
     "new_generic_runtime_dependencies": 0
   }
 }
