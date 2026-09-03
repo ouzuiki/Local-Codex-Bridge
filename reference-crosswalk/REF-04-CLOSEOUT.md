@@ -22,15 +22,18 @@ LClB permission timeout/disconnect
 
 Classification: `CONFIRMED_GAP`.
 
-Repair chain:
+Complete repair/hardening chain:
 
 ```text
 3e6ce9a  publish full Claude pending-set transitions
 00c76d0  make runner projection follow authoritative broker set
-234e20b  lock timeout/disconnect regression
+73b936f  preserve pre-existing stdin drain/backpressure semantics
+3e38f10  add focused REF-04 pending-authority timeout regression
+721f3b6  remove temporary REF-04 repair workflow
+234e20b  strengthen permanent timeout + disconnect regression
 ```
 
-No `Tri-Bridge Contract v1` change was required.
+No `Tri-Bridge Contract v1` change was required, and no new runtime dependency was introduced.
 
 Durable serializable HITL pause/resume offered by reference runtimes is stronger than current Tri-Bridge behavior, but is not a current requirement. It is explicitly deferred to REF-03C durable-runtime admission criteria rather than implemented inside Bridges.
 
