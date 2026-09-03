@@ -39,7 +39,7 @@ commit
     ↓
 push
     ↓
-working-tree clean verification
+working-tree / repository final-state verification
     ↓
 close
 ```
@@ -102,15 +102,37 @@ The final gate includes all pre-commit evidence plus:
 
 8. `commit` — created or explicitly not needed;
 9. `push` — pushed or explicitly not needed;
-10. `tree` — verified clean.
+10. `tree` — interpreted according to the execution workspace.
+
+The caller must declare:
+
+```text
+workspace_kind = working_tree | remote_only
+```
+
+For a normal local checkout:
+
+```text
+workspace_kind = working_tree
+tree           = clean
+```
+
+Anything else (`dirty`, `unknown`, or `not_applicable`) blocks closure. A local task may never use `not_applicable` to bypass clean-tree verification.
+
+For a remote-only repository path that never owns or mutates a local checkout, such as an authorized GitHub API write path:
+
+```text
+workspace_kind = remote_only
+tree           = not_applicable
+```
+
+`remote_only` does not mean “assume clean.” It means there is no mutable local working tree whose cleanliness can truthfully be asserted. Supplying `clean`, `dirty`, or `unknown` under `remote_only` is rejected so the evidence model cannot blur those two execution environments.
 
 Passing result:
 
 ```text
 action = close_task
 ```
-
-A dirty or unverified tree blocks closure.
 
 ### Completion responsibility
 
@@ -383,11 +405,12 @@ A live provider smoke is required only when the affected seam cannot be validate
 
 ## P3 deterministic regression
 
-Regression suite:
+Regression suites:
 
-`supervisor-policy/p3.test.mjs`
+- `supervisor-policy/p3.test.mjs`
+- `supervisor-policy/p3-remote.test.mjs`
 
-It is included in the repository's permanent `npm test` path alongside P2 policy tests.
+They are included in the repository's permanent `npm test` path alongside P2 policy tests.
 
 Coverage includes:
 
@@ -395,7 +418,10 @@ Coverage includes:
 - explicit pre-commit vs final closure semantics;
 - no implicit skipped tests;
 - docs/memory blockers;
-- dirty-tree blocker;
+- local dirty/unknown-tree blocker;
+- local working tree cannot use `not_applicable`;
+- remote-only completion requires explicit `tree = not_applicable`;
+- remote-only path cannot falsely claim a clean local tree;
 - fresh-run selective recall;
 - advisory memory authority;
 - durable-memory allowlist;
