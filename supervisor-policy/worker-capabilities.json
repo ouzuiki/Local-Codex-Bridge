@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "owner": "supervisor",
+  "contract": "Tri-Bridge Contract v1",
+  "as_of": "2026-09-04",
+  "workers": {
+    "claude": {
+      "bridge": "LClB",
+      "role": "primary-quality-worker",
+      "capabilities": {
+        "control_contract_v1": true,
+        "coding": true,
+        "approval_hitl": true,
+        "health_probe": true,
+        "enforced_read_only": false,
+        "bounded_mutation_scope": false,
+        "model_override": false,
+        "provider_override": false,
+        "quota_probe": false,
+        "post_run_cost": true,
+        "post_run_usage": true,
+        "native_persistent_thread_inventory": false
+      },
+      "evidence": [
+        "Local-Claude-Bridge/src/tools.ts",
+        "Local-Claude-Bridge/src/runtime.ts"
+      ]
+    },
+    "codex": {
+      "bridge": "LCB",
+      "role": "quality-fallback-and-codex-native-worker",
+      "capabilities": {
+        "control_contract_v1": true,
+        "coding": true,
+        "approval_hitl": true,
+        "health_probe": false,
+        "enforced_read_only": true,
+        "bounded_mutation_scope": false,
+        "model_override": true,
+        "provider_override": false,
+        "quota_probe": true,
+        "post_run_cost": false,
+        "post_run_usage": false,
+        "native_persistent_thread_inventory": true
+      },
+      "evidence": [
+        "Local-Codex-Bridge/src/tools.ts"
+      ]
+    },
+    "pi": {
+      "bridge": "LPB",
+      "role": "economy-and-bounded-scope-worker",
+      "capabilities": {
+        "control_contract_v1": true,
+        "coding": true,
+        "approval_hitl": true,
+        "health_probe": false,
+        "enforced_read_only": true,
+        "bounded_mutation_scope": true,
+        "model_override": true,
+        "provider_override": true,
+        "quota_probe": false,
+        "post_run_cost": true,
+        "post_run_usage": true,
+        "native_persistent_thread_inventory": false
+      },
+      "evidence": [
+        "Local-Pi-Bridge/src/mcp-adapter.js",
+        "Local-Pi-Bridge/src/supervisor.js"
+      ]
+    }
+  }
+}
