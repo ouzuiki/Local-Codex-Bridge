@@ -13,7 +13,7 @@
     "memory_record_assessment",
     "commit",
     "push",
-    "working_tree_clean_verification",
+    "repository_final_state_verification",
     "close"
   ],
   "policy_bindings": {
@@ -25,7 +25,7 @@
     "memory_record_assessment": "supervisor-policy/memory-policy.mjs#evaluateRecordPolicy",
     "commit": "Supervisor-authorized repository action",
     "push": "Supervisor-authorized repository action",
-    "working_tree_clean_verification": "supervisor-policy/completion-gate.mjs#evaluateCompletionGate(final)",
+    "repository_final_state_verification": "supervisor-policy/completion-gate.mjs#evaluateCompletionGate(final); working_tree requires clean, remote_only requires not_applicable",
     "close": "Only after final Completion Gate passes"
   }
 }
