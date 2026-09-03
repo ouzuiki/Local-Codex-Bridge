@@ -41,6 +41,21 @@ test("economy mode prefers Pi without changing Bridge semantics", () => {
   assert.deepEqual(decision.fallback_chain, ["claude", "codex"]);
 });
 
+test("quality mode demotes a critical-budget worker before availability confidence", () => {
+  const decision = selectWorker({
+    policy: { budget_mode: "quality" },
+    state: {
+      workers: {
+        claude: { availability: "available", budget_pressure: "critical" },
+        codex: { availability: "unknown", budget_pressure: "normal" },
+        pi: { availability: "unknown", budget_pressure: "normal" },
+      },
+    },
+  });
+  assert.equal(decision.worker, "codex");
+  assert.deepEqual(decision.fallback_chain, ["pi", "claude"]);
+});
+
 test("explicit Claude preference is honored while viable", () => {
   const decision = selectWorker({
     policy: { budget_mode: "economy", preferred_worker: "claude" },
@@ -140,13 +155,22 @@ test("no viable worker returns no_worker with reasons instead of inventing a rou
   assert.equal(decision.rejected.length, 3);
 });
 
-test("Codex quota normalization uses observed remaining percentage only", () => {
+test("Codex quota normalization uses the main observed rate-limit windows only", () => {
   assert.deepEqual(classifyCodexQuota({
     rateLimits: {
       primary: { remainingPercent: 72 },
       secondary: { remainingPercent: 18 },
     },
   }), { pressure: "caution", remaining_percent: 18, source: "codex_rate_limits" });
+  assert.deepEqual(classifyCodexQuota({
+    rateLimits: {
+      primary: { remainingPercent: 72 },
+      secondary: { remainingPercent: 60 },
+    },
+    rateLimitsByLimitId: {
+      unrelated: { primary: { remainingPercent: 1 } },
+    },
+  }), { pressure: "normal", remaining_percent: 60, source: "codex_rate_limits" });
   assert.equal(classifyCodexQuota({ spendControlReached: true }).pressure, "exhausted");
   assert.equal(classifyCodexQuota({ rateLimits: { primary: { remainingPercent: 6 } } }).pressure, "critical");
   assert.equal(classifyCodexQuota({}).pressure, "unknown");
