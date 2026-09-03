@@ -128,13 +128,16 @@ impact = correctness / HITL safety
 contract_change = no
 ```
 
-Minimal repair:
+Repair/hardening chain:
 
 - `3e6ce9a` — permission broker publishes full pending-set changes after add/remove transitions;
 - `00c76d0` — runner subscribes to that authoritative pending set instead of manually refreshing only selected paths;
-- `234e20b` — regression covers timeout and client-disconnect transitions to authoritative empty pending state.
+- `73b936f` — removes an accidental duplicate stdin `drain` listener introduced while applying the repair, preserving prior stdin backpressure semantics;
+- `3e38f10` — adds focused REF-04 timeout regression for `[1, 0]` pending-set transitions;
+- `721f3b6` — removes the temporary repair workflow after the code repair landed;
+- `234e20b` — strengthens permanent broker regression to cover both timeout and client-disconnect authoritative empty-state transitions.
 
-The repair changes no Claude native permission semantics and adds no approval memory.
+The repair changes no Claude native permission semantics, adds no approval memory, and does not revise the common contract.
 
 Post-repair state: `REPAIRED`.
 
