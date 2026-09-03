@@ -144,15 +144,18 @@ function orderedCandidates(task, state, policy) {
     if (policy.preferred_worker === b) return 1;
     const aState = state.workers[a];
     const bState = state.workers[b];
-    const availability = AVAILABILITY_RANK[aState.availability] - AVAILABILITY_RANK[bState.availability];
-    if (availability !== 0) return availability;
-    if (policy.budget_mode !== "quality") {
-      const pressure = PRESSURE_RANK[aState.budget_pressure] - PRESSURE_RANK[bState.budget_pressure];
-      if (pressure !== 0) return pressure;
-    } else {
+
+    if (policy.budget_mode === "quality") {
       const aCritical = aState.budget_pressure === "critical" ? 1 : 0;
       const bCritical = bState.budget_pressure === "critical" ? 1 : 0;
       if (aCritical !== bCritical) return aCritical - bCritical;
+      const availability = AVAILABILITY_RANK[aState.availability] - AVAILABILITY_RANK[bState.availability];
+      if (availability !== 0) return availability;
+    } else {
+      const availability = AVAILABILITY_RANK[aState.availability] - AVAILABILITY_RANK[bState.availability];
+      if (availability !== 0) return availability;
+      const pressure = PRESSURE_RANK[aState.budget_pressure] - PRESSURE_RANK[bState.budget_pressure];
+      if (pressure !== 0) return pressure;
     }
     return baseIndex.get(a) - baseIndex.get(b);
   });
@@ -232,10 +235,15 @@ export function classifyCodexQuota(rateLimits) {
   if (rateLimits === null || typeof rateLimits !== "object" || Array.isArray(rateLimits)) {
     return { pressure: "unknown", remaining_percent: null, source: "codex_rate_limits" };
   }
-  if (rateLimits.spendControlReached === true || typeof rateLimits.rateLimitReachedType === "string") {
+  const main = rateLimits.rateLimits !== null && typeof rateLimits.rateLimits === "object" && !Array.isArray(rateLimits.rateLimits)
+    ? rateLimits.rateLimits
+    : rateLimits;
+  const spendControlReached = rateLimits.spendControlReached ?? main.spendControlReached;
+  const reachedType = rateLimits.rateLimitReachedType ?? main.rateLimitReachedType;
+  if (spendControlReached === true || (typeof reachedType === "string" && reachedType.length > 0)) {
     return { pressure: "exhausted", remaining_percent: 0, source: "codex_rate_limits" };
   }
-  const values = collectRemainingPercent(rateLimits);
+  const values = collectRemainingPercent(main);
   if (values.length === 0) {
     return { pressure: "unknown", remaining_percent: null, source: "codex_rate_limits" };
   }
