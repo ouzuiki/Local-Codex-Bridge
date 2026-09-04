@@ -1,6 +1,6 @@
 # REF-05 — Context / Skill Loading Crosswalk
 
-**Status:** PASS — selective context policy implemented  
+**Status:** CLOSED / PASS  
 **Audit date:** 2026-09-04  
 **Primary references:** Google Agents CLI Skills, current Tri-Bridge Context Contract, P3 memory policy
 
@@ -188,7 +188,30 @@ It is included in normal `npm test` and covers:
 
 The pre-existing tri-worker `AGENTS.md` context regression remains unchanged and continues to validate native project-context loading.
 
-**REF-05D decision:** `PASS` pending permanent CI evidence.
+### Permanent CI evidence
+
+Implementation/documentation head validated:
+
+```text
+e0b23bd85faac6a775c129178838a3479c15f998
+```
+
+CI run:
+
+```text
+33820517914
+```
+
+Result:
+
+```text
+Verify (macOS / Node 24)   SUCCESS
+Verify (Windows / Node 24) SUCCESS
+```
+
+Both jobs completed dependency installation, typecheck, build, and the full test suite successfully.
+
+**REF-05D decision:** `PASS / CLOSED`.
 
 ---
 
@@ -198,13 +221,15 @@ The pre-existing tri-worker `AGENTS.md` context regression remains unchanged and
 REF-05A Context authority crosswalk       PASS
 REF-05B Skill Catalog v1                  PASS
 REF-05C Context Selection Policy          PASS
-REF-05D deterministic regression          IMPLEMENTED
+REF-05D deterministic regression          PASS / CLOSED
 
 universal context loader                  NO
 central Skill-content store               NO
 Bridge context scanning                   NO
 native loader ownership                   PRESERVED
 advisory memory authority                 PRESERVED
+blocking gaps remaining                   0
+unknown findings remaining                0
 ```
 
-# REF-05: IMPLEMENTED / AWAITING FINAL CI CLOSEOUT
+# REF-05: CLOSED / PASS
