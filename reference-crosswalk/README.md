@@ -1,6 +1,6 @@
 # Tri-Bridge External Reference Crosswalk
 
-**Status:** REF-P0 CLOSED; REF-P1 CLOSED; Agent Skills Native Adoption Audit COMPLETE / PARTIAL ADOPTION  
+**Status:** REF-P0 CLOSED; REF-P1 CLOSED; Agent Skills Native Adoption CLOSED; Supervisor Operational Wiring CLOSED  
 **Audit date:** 2026-09-04  
 **Original P0-P3 validation baseline:** `550796c03054369b5ac96ba7cad8b3851a2ca2a5` (`P3 CLOSED`)  
 **Purpose:** validate and harden the existing P0-P3 architecture against mature agent/runtime references without importing framework complexity by default.
@@ -10,20 +10,11 @@
 ### REF-P0 — execution / harness / runtime boundary
 
 ```text
-REF-04A Task / Execution Identity Audit
-REF-04B Event Semantics Crosswalk
-REF-04C HITL / Cancel / Resume Crosswalk
-REF-04 Closeout
+REF-04 Task / Event / HITL
         ↓
-REF-01A Native Harness Ownership Matrix
-REF-01B Cancellation / Lifecycle / Hook Crosswalk
-REF-01C Double-Harness Duplication Audit
-REF-01 Closeout
+REF-01 Native Harness Boundary
         ↓
-REF-03A Runtime Capability Matrix
-REF-03B P2/P3 Runtime-Creep Audit
-REF-03C Durable-Runtime Admission Criteria
-REF-03 Closeout
+REF-03 Worker-neutral Runtime Boundary
         ↓
 REF-P0 Final Closeout
 ```
@@ -33,40 +24,65 @@ Canonical closeout: `REF-P0-CLOSEOUT.md`.
 ### REF-P1 — orchestration / registry / context / Skill boundary
 
 ```text
-REF-02A Current Orchestration Ownership Audit
-REF-02B Static Manifest vs Registry Crosswalk
-REF-02C Registry / Orchestrator Admission Gate
-REF-02 Closeout
+REF-02 Registry / Orchestrator Admission
         ↓
-REF-05A Context Layer / Authority Crosswalk
-REF-05B Skill Catalog v1
-REF-05C Context Selection + Collision Policy
-REF-05D Tri-worker Context / Skill Regression
-REF-05 Closeout
+REF-05 Context / Skill Boundary
         ↓
 REF-P1 Final Closeout
 ```
 
 Canonical closeout: `REF-P1-CLOSEOUT.md`.
 
-## Post-REF-P1 native adoption audit
+## Post-REF-P1 native adoption
 
-`AGENT-SKILLS-NATIVE-ADOPTION-AUDIT.md` re-checks the Skill portion of REF-05 against the current native harnesses.
+The discovery-time audit is preserved in `AGENT-SKILLS-NATIVE-ADOPTION-AUDIT.md`. It intentionally records the LPB gap as it was found. The repaired/final state is authoritative in `AGENT-SKILLS-NATIVE-ADOPTION-CLOSEOUT.md`.
 
-It freezes the operational refinement:
+Final native Skill ownership:
 
 ```text
-Agent Skills / SKILL.md              ADOPT
-pet-hotel-manager `.agents/skills`   shared Skill-content SSOT
-Codex Skill routing/loading          native
-Claude Skill routing/loading         native via `.claude/skills` symlink aliases
-Pi Skill routing/loading             native after LPB compatibility repair
-Supervisor Skill router              DO NOT BUILD
+Agent Skills / SKILL.md               ADOPT
+pet-hotel-manager `.agents/skills`    shared Skill-content SSOT
+Codex Skill routing/loading           native
+Claude Skill routing/loading          native via `.claude/skills` symlink aliases
+Pi Skill routing/loading              native via repaired LPB resource compatibility
+Supervisor production Skill router    DO NOT BUILD
 ```
 
-The audit found one current compatibility seam in LPB: `pi_start` explicitly passes `--no-skills`, and LPB read-scope can also block Pi's on-demand read of a selected `SKILL.md`. The audit is complete; native adoption remains partial until that narrowly scoped LPB repair is implemented.
+The original LPB `--no-skills` / read-scope compatibility finding was repaired without enabling ambient Skill discovery: LPB keeps `--no-skills`, publishes only the canonical project `.agents/skills` root through Pi's native `resources_discover` seam, and permits read-only procedure access to that root while leaving mutation authority unchanged.
 
 REF-05 `skill-catalog.json` and `selectMinimalSkills()` remain schema/regression/reference mechanisms. They are not the production Skill discovery/loading owner and must not grow into a Skill Registry, filesystem scanner, semantic router, synchronizer, or content loader.
+
+## Supervisor operational wiring
+
+`OPERATIONAL-WIRING-AUDIT.md` distinguishes policy existence from real execution ownership. `OPERATIONAL-WIRING-CLOSEOUT.md` records the final implementation.
+
+The new canonical composition seam is:
+
+```text
+Task
+  ↓
+buildExecutionPlan()
+  ├─ P2 selectWorker()
+  ├─ active/HITL/unknown-ack control state
+  ├─ project-contract/conflict checks
+  ├─ P3 evaluateRecallPolicy()
+  ├─ native Agent Skills ownership
+  └─ context authority/evidence
+  ↓
+ExecutionPlan (data only)
+  ↓
+ChatGPT Supervisor invokes selected existing Bridge
+  ↓
+Native Worker
+  ↓
+Supervisor verification
+  ↓
+P3 Completion Gate
+```
+
+`buildExecutionPlan()` is deliberately pure and non-executing. It does not invoke Bridges, contact TencentDB, load Skills, persist workflow state, retry, or route active runs.
+
+Machine-enforced interception of every ChatGPT Web execution is **not** claimed. A repository function cannot intercept the Web Supervisor by itself. A future stateless Supervisor Policy Adapter is admission-gated and should be evaluated only after real policy misses, multi-Supervisor enforcement needs, compliance requirements, or non-ChatGPT programmatic callers prove the need. It must not become a fourth runtime.
 
 ## Adjudication vocabulary
 
@@ -87,24 +103,25 @@ A `CONFIRMED_GAP` is the only classification that automatically opens a repair d
 Official/reference sources reviewed on 2026-09-04 include:
 
 - OpenAI Agents SDK — Human-in-the-loop / RunState / streaming.
-- OpenAI Codex / ChatGPT Skill documentation — Agent Skills, `.agents/skills`, progressive disclosure and symlinked Skill directories.
+- OpenAI Codex — Agent Skills, app-server Skills APIs, progressive disclosure.
 - Strands Agents — Agent Loop / Hooks / Interrupts.
 - Microsoft Agent Framework — Workflow concepts / orchestration / HITL / checkpoints.
-- Microsoft agent architecture guidance — orchestrator/subagent ownership, architecture components, catalogs/registries and multi-agent scaling boundaries.
-- Anthropic `commerce-agents` — core/runtime split and cross-runtime deterministic gates.
-- Claude Code — Agent Skills, `.claude/skills`, project discovery and symlinked Skill directories.
-- Pi coding agent — Agent Skills, `.agents/skills`, explicit `--skill` resources, progressive disclosure and project-trust semantics.
+- Microsoft agent architecture guidance — orchestrator/subagent ownership, catalogs/registries and multi-agent scaling boundaries.
+- Anthropic `commerce-agents` — core/runtime split and deterministic gates.
+- Claude Code — Agent Skills, project discovery and symlinked Skill directories.
+- Pi coding agent — Agent Skills, native resource discovery, RPC commands, progressive disclosure and project-trust semantics.
 - Google Agents CLI — Skills and coding-agent integration patterns.
 
 The crosswalk records semantics and ownership, not API-name similarity.
 
 ## Frozen operating conclusions
 
-After REF-P0 + REF-P1 + the Agent Skills native audit:
-
 ```text
 ChatGPT Supervisor
-  = task decomposition / semantic orchestration / acceptance
+  = task decomposition / semantic orchestration / acceptance / execution caller
+
+buildExecutionPlan()
+  = pure Worker/context/memory decision composition
 
 P2 policy
   = deterministic Worker eligibility / preference / fallback
@@ -113,11 +130,11 @@ worker-capabilities.json
   = current static Worker capability catalog
 
 registry-admission.mjs
-  = decision gate for future Registry / orchestrator adoption
+  = future Registry / orchestrator adoption gate
 
 context-policy.mjs
-  = non-executing context-authority / memory / conflict policy;
-    Skill-selection helpers are reference/regression only
+  = context authority / memory / conflict reference policy;
+    Skill-selection helpers are not production routing
 
 AGENTS.md / native session / native Agent Skills loader
   = Worker-native context and procedure mechanisms
@@ -126,17 +143,20 @@ pet-hotel-manager `.agents/skills`
   = canonical project Skill-content SSOT
 
 TencentDB
-  = selective advisory project memory
+  = selective advisory project memory through authoritative existing transports
 
 LCB / LPB / LClB
   = thin native protocol adapters
+
+P3 Completion Gate
+  = final task-close authority
 ```
 
-Do not introduce a Registry service, orchestration runtime, universal context loader, centralized Skill-content store, Bridge Skill router, or Bridge filesystem Skill scanner without a proven admission trigger.
+Do not introduce a Registry service, orchestration runtime, universal context loader, centralized Skill-content store, Bridge Skill router, cross-Bridge router, duplicate memory hook, or Supervisor daemon without a proven admission trigger.
 
 ## Baseline discipline
 
-The original P0-P3 system definition was frozen at the baseline above. REF repairs and policies are recorded as post-baseline validation/hardening and cannot be used to rewrite what the audit originally found.
+The original P0-P3 system definition was frozen at the baseline above. REF repairs and policies are recorded as post-baseline validation/hardening and cannot be used to rewrite what an earlier audit originally found.
 
 ## Repair rule
 
@@ -146,7 +166,7 @@ Crosswalk work is read-only by default. If a `CONFIRMED_GAP` is found:
 2. classify ownership (`Supervisor`, `Bridge`, `Native Worker`, `External Infrastructure`);
 3. make the smallest compatible repair at that seam;
 4. add deterministic regression where feasible;
-5. run the repository's permanent CI;
-6. update the finding to `REPAIRED` without changing its original classification.
+5. run permanent CI;
+6. close the repair without erasing the original finding.
 
 Do not use crosswalk work as permission for opportunistic framework adoption.
