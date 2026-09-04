@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "owner": "project_or_supervisor_catalog",
+  "centralized_skill_content": false,
+  "loader_owner": "native_worker",
+  "default_load_mode": "on_demand",
+  "principle": "minimum_sufficient_context",
+  "skill_schema": {
+    "required": ["id", "covers", "load_mode"],
+    "optional": ["workers", "priority", "authority", "source"],
+    "load_modes": ["on_demand"],
+    "worker_values": ["claude", "codex", "pi", "*"]
+  },
+  "skills": []
+}
