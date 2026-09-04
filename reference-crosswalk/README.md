@@ -1,6 +1,6 @@
 # Tri-Bridge External Reference Crosswalk
 
-**Status:** REF-P0 CLOSED; REF-P1 CLOSED  
+**Status:** REF-P0 CLOSED; REF-P1 CLOSED; Agent Skills Native Adoption Audit COMPLETE / PARTIAL ADOPTION  
 **Audit date:** 2026-09-04  
 **Original P0-P3 validation baseline:** `550796c03054369b5ac96ba7cad8b3851a2ca2a5` (`P3 CLOSED`)  
 **Purpose:** validate and harden the existing P0-P3 architecture against mature agent/runtime references without importing framework complexity by default.
@@ -49,6 +49,25 @@ REF-P1 Final Closeout
 
 Canonical closeout: `REF-P1-CLOSEOUT.md`.
 
+## Post-REF-P1 native adoption audit
+
+`AGENT-SKILLS-NATIVE-ADOPTION-AUDIT.md` re-checks the Skill portion of REF-05 against the current native harnesses.
+
+It freezes the operational refinement:
+
+```text
+Agent Skills / SKILL.md              ADOPT
+pet-hotel-manager `.agents/skills`   shared Skill-content SSOT
+Codex Skill routing/loading          native
+Claude Skill routing/loading         native via `.claude/skills` symlink aliases
+Pi Skill routing/loading             native after LPB compatibility repair
+Supervisor Skill router              DO NOT BUILD
+```
+
+The audit found one current compatibility seam in LPB: `pi_start` explicitly passes `--no-skills`, and LPB read-scope can also block Pi's on-demand read of a selected `SKILL.md`. The audit is complete; native adoption remains partial until that narrowly scoped LPB repair is implemented.
+
+REF-05 `skill-catalog.json` and `selectMinimalSkills()` remain schema/regression/reference mechanisms. They are not the production Skill discovery/loading owner and must not grow into a Skill Registry, filesystem scanner, semantic router, synchronizer, or content loader.
+
 ## Adjudication vocabulary
 
 Every finding uses exactly one primary classification:
@@ -68,17 +87,20 @@ A `CONFIRMED_GAP` is the only classification that automatically opens a repair d
 Official/reference sources reviewed on 2026-09-04 include:
 
 - OpenAI Agents SDK — Human-in-the-loop / RunState / streaming.
+- OpenAI Codex / ChatGPT Skill documentation — Agent Skills, `.agents/skills`, progressive disclosure and symlinked Skill directories.
 - Strands Agents — Agent Loop / Hooks / Interrupts.
 - Microsoft Agent Framework — Workflow concepts / orchestration / HITL / checkpoints.
 - Microsoft agent architecture guidance — orchestrator/subagent ownership, architecture components, catalogs/registries and multi-agent scaling boundaries.
 - Anthropic `commerce-agents` — core/runtime split and cross-runtime deterministic gates.
+- Claude Code — Agent Skills, `.claude/skills`, project discovery and symlinked Skill directories.
+- Pi coding agent — Agent Skills, `.agents/skills`, explicit `--skill` resources, progressive disclosure and project-trust semantics.
 - Google Agents CLI — Skills and coding-agent integration patterns.
 
 The crosswalk records semantics and ownership, not API-name similarity.
 
 ## Frozen operating conclusions
 
-After REF-P0 + REF-P1:
+After REF-P0 + REF-P1 + the Agent Skills native audit:
 
 ```text
 ChatGPT Supervisor
@@ -94,10 +116,14 @@ registry-admission.mjs
   = decision gate for future Registry / orchestrator adoption
 
 context-policy.mjs
-  = non-executing minimum-context / Skill-selection policy
+  = non-executing context-authority / memory / conflict policy;
+    Skill-selection helpers are reference/regression only
 
-AGENTS.md / native session / native Skill loader
-  = Worker-native context mechanisms
+AGENTS.md / native session / native Agent Skills loader
+  = Worker-native context and procedure mechanisms
+
+pet-hotel-manager `.agents/skills`
+  = canonical project Skill-content SSOT
 
 TencentDB
   = selective advisory project memory
@@ -106,7 +132,7 @@ LCB / LPB / LClB
   = thin native protocol adapters
 ```
 
-Do not introduce a Registry service, orchestration runtime, universal context loader, centralized Skill-content store, or Bridge context scanner without a proven admission trigger.
+Do not introduce a Registry service, orchestration runtime, universal context loader, centralized Skill-content store, Bridge Skill router, or Bridge filesystem Skill scanner without a proven admission trigger.
 
 ## Baseline discipline
 
