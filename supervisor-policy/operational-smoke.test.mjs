@@ -47,7 +47,7 @@ test("operational contract smoke: task -> selection -> memory/context -> accepta
       docs: "updated",
       agents: "not_needed",
       decisions: "updated",
-      memory: "assessed",
+      memory: "not_needed",
       commit: "created",
       push: "pushed",
       tree: "not_applicable",
