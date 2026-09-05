@@ -91,6 +91,14 @@ export interface TerminalSnapshot {
   final_result: string | null;
   error: unknown | null;
   turn: unknown;
+  memory_writeback?: MemoryWritebackStatus;
+}
+
+export type MemoryWritebackStatus = "skipped" | "queued" | "written" | "failed";
+
+export interface TerminalNotification {
+  threadId: string;
+  terminal: TerminalSnapshot;
 }
 
 interface ThreadRuntime {
@@ -417,6 +425,7 @@ export class RuntimeStore {
   readonly #responding = new Map<string, PendingServerRequest>();
   readonly #turnToThread = new Map<string, string>();
   readonly #changeWaiters = new Map<string, Set<() => void>>();
+  readonly #terminalListeners = new Set<(notification: TerminalNotification) => void>();
 
   constructor(
     private readonly ringLimit = 256,
@@ -430,6 +439,18 @@ export class RuntimeStore {
 
   hasThread(threadId: string): boolean {
     return this.#threads.has(threadId);
+  }
+
+  onTerminal(listener: (notification: TerminalNotification) => void): () => void {
+    this.#terminalListeners.add(listener);
+    return () => this.#terminalListeners.delete(listener);
+  }
+
+  setMemoryWritebackStatus(threadId: string, turnId: string, status: MemoryWritebackStatus): void {
+    const runtime = this.#threads.get(threadId);
+    if (!runtime?.terminal || runtime.terminal.turn_id !== turnId) return;
+    runtime.terminal.memory_writeback = status;
+    this.#signalChange(runtime);
   }
 
   currentCursor(threadId: string): number {
@@ -641,6 +662,7 @@ export class RuntimeStore {
           error: sanitizeForTransport(error),
           turn: sanitizeForTransport(turn),
         };
+        const terminal = runtime.terminal;
         this.#turnToThread.delete(terminalTurnId);
         this.clearPendingForThread(threadId, terminalTurnId);
         this.#publishUx({
@@ -649,6 +671,13 @@ export class RuntimeStore {
           turn_id: terminalTurnId,
           status,
         });
+        for (const listener of this.#terminalListeners) {
+          try {
+            listener({ threadId, terminal });
+          } catch {
+            // Terminal projection must remain fail-open for observers.
+          }
+        }
       }
     } else if (method === "thread/status/changed") {
       const status = asRecord(params)?.status;

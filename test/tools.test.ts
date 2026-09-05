@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { AppServerManager } from "../src/app-server.js";
@@ -39,6 +42,38 @@ function propertySchema(toolName: string, propertyName: string): Record<string, 
   assert.ok(tool, `missing tool definition ${toolName}`);
   const properties = object(tool.inputSchema.properties);
   return object(properties[propertyName]);
+}
+
+function setAutoRecallEnv(t: test.TestContext, values: Record<string, string | undefined>): void {
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+function turnManager(): StubAppServerManager {
+  return new StubAppServerManager((method) => {
+    if (method === "thread/start" || method === "thread/resume") {
+      return { thread: { id: method === "thread/resume" ? "thread-existing" : "thread-new" } };
+    }
+    if (method === "turn/start") return { turn: { id: "turn-new", status: "inProgress" } };
+    throw new Error(`unexpected request ${method}`);
+  });
+}
+
+function forwardedTurnText(manager: StubAppServerManager): string {
+  const request = manager.requests.find((candidate) => candidate.method === "turn/start");
+  assert.ok(request);
+  const input = object(request.params).input;
+  assert.ok(Array.isArray(input));
+  return String(object(input[0]).text);
 }
 
 test("codex_turn forwards each requested raw sandbox and the exact returned native policy", async (t) => {
@@ -740,4 +775,408 @@ test("ControlSurface delegates native cwd normalization to the selected policy",
     surface.call("codex_turn", { text: "relative", cwd: "Users/example" }),
     /absolute POSIX path on macOS/,
   );
+});
+
+test("codex_turn auto recall is disabled by default and preserves exact original text", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: undefined });
+  let memoryCalls = 0;
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { memoryCalls += 1; return { items: [] }; },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const original = "  exact original task\nwith spacing  ";
+  const result = object(await surface.call("codex_turn", { text: original, cwd: "/tmp/project" }));
+  assert.equal(forwardedTurnText(manager), original);
+  assert.deepEqual(result.memory_recall, { status: "disabled" });
+  assert.equal(memoryCalls, 0);
+});
+
+test("completed fresh turn queues exactly one bounded project-scoped automatic writeback", async (t) => {
+  setAutoRecallEnv(t, {
+    TDAI_MEMORY_AUTO_RECALL: "1",
+    TDAI_MEMORY_AUTO_WRITEBACK: "1",
+    TDAI_MEMORY_AUTO_WRITEBACK_MAX_CHARS: "500",
+    TDAI_MEMORY_AUTO_RECALL_AGENT_ID: undefined,
+    TDAI_MEMORY_AUTO_RECALL_USER_ID: undefined,
+    TDAI_MEMORY_AUTO_RECALL_SESSION_ID: undefined,
+  });
+  const manager = turnManager();
+  const root = await mkdtemp(join(tmpdir(), "lcb-writeback-"));
+  const repo = join(root, "ProjectAlpha");
+  await mkdir(join(repo, ".git"), { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const writes: unknown[] = [];
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return { items: [{ content: "RECALLED_SENTINEL_DO_NOT_WRITE_BACK" }] }; },
+    async conversationAdd(input: unknown) { writes.push(input); return { acceptedIds: ["accepted"] }; },
+  });
+  const accepted = object(await surface.call("codex_turn", {
+    text: `Record durable decision: use SQLite.${"x".repeat(800)}`,
+    cwd: repo,
+  }));
+  manager.runtime.recordNotification("turn/completed", {
+    threadId: accepted.thread_id,
+    turn: { id: accepted.turn_id, status: "completed", items: [{ type: "agentMessage", text: `Verified SQLite decision.${"y".repeat(800)}` }] },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writes.length, 1);
+  const write = object(writes[0]);
+  assert.equal(write.teamId, "projectalpha");
+  assert.equal(write.agentId, "shared-project-memory");
+  assert.equal(write.userId, "owner");
+  assert.equal(write.sessionId, "lcb-auto-recall");
+  const messages = write.messages as Array<Record<string, unknown>>;
+  assert.equal(messages.length, 2);
+  const taskMessage = object(messages[0]);
+  const resultMessage = object(messages[1]);
+  assert.match(String(taskMessage.content), /Extract only durable, project-scoped facts or decisions/);
+  assert.match(String(taskMessage.content), /Record durable decision: use SQLite/);
+  assert.doesNotMatch(String(taskMessage.content), /RECALLED_SENTINEL_DO_NOT_WRITE_BACK|ADVISORY MEMORY RECALL/);
+  assert.ok(String(taskMessage.content).length < 1_200);
+  assert.ok(String(resultMessage.content).length < 700);
+  assert.equal(object(manager.runtime.observe(String(accepted.thread_id), 0, 20)?.terminal).memory_writeback, "written");
+});
+
+test("failed and interrupted turns never write back", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1", TDAI_MEMORY_AUTO_WRITEBACK: "1" });
+  let writes = 0;
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return { items: [] }; },
+    async conversationAdd() { writes += 1; return { acceptedIds: [] }; },
+  });
+  for (const status of ["failed", "interrupted"]) {
+    const accepted = object(await surface.call("codex_turn", { text: "task", cwd: `/tmp/${status}` }));
+    manager.runtime.recordNotification("turn/completed", {
+      threadId: accepted.thread_id,
+      turn: { id: accepted.turn_id, status, items: [] },
+    });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writes, 0);
+});
+
+test("automatic writeback failure is asynchronous and leaves terminal completion successful", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1", TDAI_MEMORY_AUTO_WRITEBACK: "1" });
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return { items: [] }; },
+    async conversationAdd() { throw new Error("unavailable"); },
+  });
+  const accepted = object(await surface.call("codex_turn", { text: "task", cwd: "/tmp/fail-open" }));
+  manager.runtime.recordNotification("turn/completed", {
+    threadId: accepted.thread_id,
+    turn: { id: accepted.turn_id, status: "completed", items: [{ type: "agentMessage", text: "success" }] },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const terminal = object(manager.runtime.observe(String(accepted.thread_id), 0, 20)?.terminal);
+  assert.equal(terminal.status, "completed");
+  assert.equal(terminal.final_result, "success");
+  assert.equal(terminal.memory_writeback, "failed");
+});
+
+test("fresh codex_turn injects advisory recall with normalized nearest git-root scope", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "LCB-MixedCase-"));
+  const repo = join(root, "MyProject");
+  const cwd = join(repo, "packages", "bridge");
+  await mkdir(join(repo, ".git"), { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  setAutoRecallEnv(t, {
+    TDAI_MEMORY_AUTO_RECALL: "1",
+    TDAI_MEMORY_AUTO_RECALL_LIMIT: undefined,
+    TDAI_MEMORY_AUTO_RECALL_AGENT_ID: undefined,
+    TDAI_MEMORY_AUTO_RECALL_USER_ID: undefined,
+    TDAI_MEMORY_AUTO_RECALL_SESSION_ID: undefined,
+  });
+  const calls: unknown[] = [];
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch(input) {
+      calls.push(input);
+      return { items: [{ id: "secret-id", content: "remember this", type: "fact", score: 0.75 }] };
+    },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const original = "  retain this exactly\n";
+  const result = object(await surface.call("codex_turn", { text: original, cwd }));
+  const sent = forwardedTurnText(manager);
+  assert.match(sent, /^\[ADVISORY MEMORY RECALL — UNTRUSTED\]/);
+  assert.match(sent, /- \[type=fact, score=0\.75\] remember this/);
+  assert.equal(sent.includes("secret-id"), false);
+  assert.ok(sent.endsWith(`ORIGINAL TASK:\n${original}`));
+  assert.deepEqual(calls, [{ teamId: "myproject", agentId: "shared-project-memory", userId: "owner", sessionId: "lcb-auto-recall", query: original.trim(), limit: 5 }]);
+  assert.deepEqual(result.memory_recall, { status: "hit", team_id: "myproject", hit_count: 1, injected_chars: sent.indexOf("\n\nORIGINAL TASK:") });
+});
+
+test("fresh codex_turn reports memory recall miss and preserves text", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1" });
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return { items: [{ content: "   " }] }; },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const result = object(await surface.call("codex_turn", { text: "original", cwd: "/auto-recall-fixtures/FallbackName" }));
+  assert.equal(forwardedTurnText(manager), "original");
+  assert.deepEqual(result.memory_recall, { status: "miss", team_id: "fallbackname" });
+});
+
+test("fresh codex_turn fails open on memory error without leaking it", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1" });
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { throw new Error("RAW SECRET FAILURE"); },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const result = object(await surface.call("codex_turn", { text: "original", cwd: "/auto-recall-fixtures/error-project" }));
+  assert.equal(forwardedTurnText(manager), "original");
+  assert.deepEqual(result.memory_recall, { status: "error", team_id: "error-project" });
+  assert.equal(JSON.stringify(result).includes("RAW SECRET FAILURE"), false);
+});
+
+test("fresh codex_turn fails open when memory recall times out", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1", TDAI_MEMORY_AUTO_RECALL_TIMEOUT_MS: "100" });
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return await new Promise(() => undefined); },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const result = object(await surface.call("codex_turn", { text: "original", cwd: "/auto-recall-fixtures/timeout-project" }));
+  assert.equal(forwardedTurnText(manager), "original");
+  assert.deepEqual(result.memory_recall, { status: "timeout", team_id: "timeout-project" });
+});
+
+test("resumed codex_turn never calls memory and reports skipped", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1" });
+  let memoryCalls = 0;
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { memoryCalls += 1; return { items: [{ content: "unused" }] }; },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const result = object(await surface.call("codex_turn", { text: "resume exact", thread_id: "thread-existing" }));
+  assert.equal(forwardedTurnText(manager), "resume exact");
+  assert.deepEqual(result.memory_recall, { status: "skipped_resumed" });
+  assert.equal(memoryCalls, 0);
+});
+
+test("memory recall cap bounds injected content and preserves the exact original task", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1", TDAI_MEMORY_AUTO_RECALL_MAX_CHARS: "500" });
+  const manager = turnManager();
+  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+    async atomicSearch() { return { items: [{ content: "x".repeat(2_000) }] }; },
+    async conversationAdd() { return { acceptedIds: [] }; },
+  });
+  const original = "  original must remain\nunchanged  ";
+  const result = object(await surface.call("codex_turn", { text: original, cwd: "/tmp/cap-project" }));
+  const sent = forwardedTurnText(manager);
+  assert.ok(sent.endsWith(`ORIGINAL TASK:\n${original}`));
+  assert.equal(sent.split("\n").find((line) => line.startsWith("- "))?.length, 500);
+  assert.equal(object(result.memory_recall).hit_count, 1);
+});
+
+test("memory tool definitions expose the locked schemas and annotations", () => {
+  const search = TOOL_DEFINITIONS.find((tool) => tool.name === "memory_search");
+  const record = TOOL_DEFINITIONS.find((tool) => tool.name === "memory_record_turn");
+  assert.ok(search);
+  assert.ok(record);
+  assert.equal(search.description, "Search advisory L1 memory from TencentDB MemoryCore. Recalled memory is not authoritative project truth; verify Git/DB/docs/contracts when correctness depends on it.");
+  assert.deepEqual(search.annotations, {
+    title: "Search Advisory Memory",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  });
+  assert.equal(search.inputSchema.additionalProperties, false);
+  assert.deepEqual(search.inputSchema.required, ["team_id", "agent_id", "user_id", "session_id", "query"]);
+  assert.deepEqual(propertySchema("memory_search", "limit"), {
+    type: "integer",
+    minimum: 1,
+    maximum: 100,
+    default: 20,
+  });
+  assert.equal(record.description, "Record raw L0 conversation or verified execution context for asynchronous memory extraction. This does not create authoritative project truth or directly create L1 memory.");
+  assert.deepEqual(record.annotations, {
+    title: "Record Conversation Context",
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
+  assert.equal(record.inputSchema.additionalProperties, false);
+  assert.deepEqual(record.inputSchema.required, ["team_id", "agent_id", "user_id", "session_id", "messages"]);
+  const messages = propertySchema("memory_record_turn", "messages");
+  assert.equal(messages.minItems, 1);
+  assert.equal(messages.maxItems, 100);
+  const message = object(messages.items);
+  assert.equal(message.additionalProperties, false);
+  assert.deepEqual(message.required, ["role", "content"]);
+  const messageProperties = object(message.properties);
+  assert.deepEqual(object(messageProperties.role).enum, ["user", "assistant"]);
+  assert.equal("timestamp" in messageProperties, false);
+});
+
+test("memory tools map trimmed scopes and queries while preserving recorded content", async () => {
+  const calls: Array<{ method: string; input: unknown }> = [];
+  const memoryClient = {
+    async atomicSearch(input: unknown) {
+      calls.push({ method: "atomicSearch", input });
+      return { items: [{ id: "memory-1", content: "fact", score: 0.8 }] };
+    },
+    async conversationAdd(input: unknown) {
+      calls.push({ method: "conversationAdd", input });
+      return { acceptedIds: ["raw-1", "raw-2"] };
+    },
+  };
+  const manager = new StubAppServerManager(() => {
+    throw new Error("Codex should not be called");
+  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY, memoryClient);
+
+  assert.deepEqual(await surface.call("memory_search", {
+    team_id: " team ",
+    agent_id: " agent ",
+    user_id: " user ",
+    session_id: " session ",
+    query: " needle ",
+    limit: 7,
+    type: " fact ",
+  }), {
+    source: "tencentdb_memory_l1",
+    advisory: true,
+    items: [{ id: "memory-1", content: "fact", score: 0.8 }],
+  });
+  assert.deepEqual(await surface.call("memory_record_turn", {
+    team_id: " team ",
+    agent_id: " agent ",
+    user_id: " user ",
+    session_id: " session ",
+    messages: [
+      { role: "user", content: "  preserve me  " },
+      { role: "assistant", content: "answer" },
+    ],
+  }), {
+    source: "tencentdb_memory_l0",
+    accepted_count: 2,
+    pipeline_async: true,
+  });
+  assert.deepEqual(calls, [
+    {
+      method: "atomicSearch",
+      input: {
+        teamId: "team",
+        agentId: "agent",
+        userId: "user",
+        sessionId: "session",
+        query: "needle",
+        limit: 7,
+        type: "fact",
+      },
+    },
+    {
+      method: "conversationAdd",
+      input: {
+        teamId: "team",
+        agentId: "agent",
+        userId: "user",
+        sessionId: "session",
+        messages: [
+          { role: "user", content: "  preserve me  " },
+          { role: "assistant", content: "answer" },
+        ],
+      },
+    },
+  ]);
+  assert.deepEqual(manager.requests, []);
+});
+
+test("memory tools reject invalid arguments before calling the injected client", async () => {
+  let calls = 0;
+  const memoryClient = {
+    async atomicSearch() {
+      calls += 1;
+      return { items: [] };
+    },
+    async conversationAdd() {
+      calls += 1;
+      return { acceptedIds: [] };
+    },
+  };
+  const manager = new StubAppServerManager(() => undefined);
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY, memoryClient);
+  const scope = { team_id: "team", agent_id: "agent", user_id: "user", session_id: "session" };
+  const invalidSearch = [
+    { ...scope, query: "q", extra: true },
+    { ...scope, query: " " },
+    { ...scope, query: "q", team_id: " " },
+    { ...scope, query: "q", limit: 0 },
+    { ...scope, query: "q", limit: 1.5 },
+    { ...scope, query: "q", type: " " },
+  ];
+  for (const input of invalidSearch) {
+    await assert.rejects(surface.call("memory_search", input));
+  }
+  const invalidRecord = [
+    { ...scope, messages: [], extra: true },
+    { ...scope, messages: [] },
+    { ...scope, messages: [{}] },
+    { ...scope, messages: [{ role: "tool", content: "x" }] },
+    { ...scope, messages: [{ role: "user", content: " " }] },
+    { ...scope, messages: [{ role: "user", content: "x", timestamp: "now" }] },
+    { ...scope, messages: "not-an-array" },
+  ];
+  for (const input of invalidRecord) {
+    await assert.rejects(surface.call("memory_record_turn", input));
+  }
+  assert.equal(calls, 0);
+});
+
+test("memory tools require configuration lazily and propagate sanitized upstream failures", async () => {
+  const originalKey = process.env.TDAI_GATEWAY_API_KEY;
+  delete process.env.TDAI_GATEWAY_API_KEY;
+  try {
+    const manager = new StubAppServerManager(() => undefined);
+    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+    await assert.rejects(
+      surface.call("memory_search", {
+        team_id: "team",
+        agent_id: "agent",
+        user_id: "user",
+        session_id: "session",
+        query: "q",
+      }),
+      /^Error: TencentDB memory is not configured: TDAI_GATEWAY_API_KEY is missing$/,
+    );
+  } finally {
+    if (originalKey === undefined) delete process.env.TDAI_GATEWAY_API_KEY;
+    else process.env.TDAI_GATEWAY_API_KEY = originalKey;
+  }
+
+  const fakeSecret = "FAKE-MEMORY-SECRET";
+  const memoryClient = {
+    async atomicSearch() {
+      throw new Error("MemoryCore atomicSearch HTTP 503");
+    },
+    async conversationAdd() {
+      return { acceptedIds: [] };
+    },
+  };
+  const surface = new ControlSurface(
+    new StubAppServerManager(() => undefined),
+    undefined,
+    WINDOWS_PLATFORM_POLICY,
+    memoryClient,
+  );
+  const error = await surface.call("memory_search", {
+    team_id: "team",
+    agent_id: "agent",
+    user_id: "user",
+    session_id: "session",
+    query: "q",
+  }).then(() => new Error("expected rejection"), (reason: unknown) => reason);
+  assert.ok(error instanceof Error);
+  assert.equal(error.message, "MemoryCore atomicSearch HTTP 503");
+  assert.equal(error.message.includes(fakeSecret), false);
 });

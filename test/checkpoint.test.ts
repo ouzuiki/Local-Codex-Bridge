@@ -27,7 +27,7 @@ import {
 
 const unavailableAppServer = {} as unknown as AppServerManager;
 
-test("checkpoint remains the final tool in the current tool catalog", () => {
+test("checkpoint remains in the current tool catalog", () => {
   assert.deepEqual(TOOL_DEFINITIONS.map((tool) => tool.name), [
     "codex_threads",
     "codex_models",
@@ -38,6 +38,8 @@ test("checkpoint remains the final tool in the current tool catalog", () => {
     "codex_respond",
     "codex_interrupt",
     "codex_checkpoint",
+    "memory_search",
+    "memory_record_turn",
   ]);
   const turn = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_turn");
   assert.match(
@@ -46,7 +48,7 @@ test("checkpoint remains the final tool in the current tool catalog", () => {
   );
   assert.match(turn?.description ?? "", /thread_id is not a permanent task identity/);
   assert.match(turn?.description ?? "", /outcome is UNKNOWN/);
-  const checkpoint = TOOL_DEFINITIONS.at(-1);
+  const checkpoint = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_checkpoint");
   assert.match(
     checkpoint?.description ?? "",
     /Initialization is not tied to crossing a ChatGPT window or round/,

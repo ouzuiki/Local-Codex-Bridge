@@ -2,7 +2,7 @@
 
 *A thin supervisory MCP bridge between external AI supervisors and native Codex.*
 
-Local Codex Bridge 是一个面向 Windows 与 macOS 的轻量 MCP stdio 适配器：
+Local Codex Bridge 是一个面向 Windows、macOS 与 Linux 的轻量 MCP stdio 适配器：
 
 ```text
 ChatGPT / external AI supervisor
@@ -41,7 +41,7 @@ V2.1.3 继续收紧 Bridge 作为 supervisory adapter 的边界，并补充：
 - 公开工具描述与运行时约束的一致性；
 - 统一版本锚点与升级假设检查。
 
-Windows 与 macOS 共用同一核心 Bridge，实现差异只保留在平台原生路径、launcher、checkpoint 默认目录、进程启动与终止等系统边界。
+Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在平台原生路径、launcher、checkpoint 默认目录、进程启动与终止等系统边界。
 
 ------
 
@@ -81,7 +81,7 @@ Windows 与 macOS 共用同一核心 Bridge，实现差异只保留在平台原�
 
 ------
 
-## 9 个 MCP 工具
+## 11 个 MCP 工具
 
 | Tool               | 用途                                                         | 边界                                                         |
 | ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -94,8 +94,20 @@ Windows 与 macOS 共用同一核心 Bridge，实现差异只保留在平台原�
 | `codex_respond`    | 回答真实存在且 Bridge 明确支持的 approval / user-input / permission request | 必须保留原始 request id 和准确 scope；不支持 elicitation     |
 | `codex_interrupt`  | 中断准确的 active thread / turn                              | 只发送原生 interrupt，不重启 Bridge 或 app-server            |
 | `codex_checkpoint` | 保存可选、精简、有界的 supervisory anchor                    | 不是 transcript、job id 或 Codex history 的替代品            |
+| `memory_search`    | 从 TencentDB MemoryCore 检索 advisory L1 memory              | 结果是 advisory，不是权威 project truth；须自行核实 Git/DB/docs |
+| `memory_record_turn` | 记录原始 L0 对话/已验证执行上下文，供异步 memory 抽取         | 不直接创建 L1 memory，也不构成权威 project truth             |
 
 完整 schema 与运行时限制以 [`src/tools.ts`](src/tools.ts) 为准。
+
+### Memory 集成（TencentDB MemoryCore）
+
+`memory_search` / `memory_record_turn` 依赖外部 TencentDB MemoryCore 网关：
+
+- `TDAI_GATEWAY_API_KEY` — 必需；未设置时两个 memory 工具会直接报错。
+- `TDAI_MEMORY_CORE_URL` — 可选，默认 `http://127.0.0.1:8420`。
+- `TDAI_MEMORY_SERVICE_ID` — 可选，默认 `local-memory-core`。
+- `TDAI_MEMORY_AUTO_RECALL` — 可选，opt-in；开启后 `codex_turn` 会在全新（非 resume）turn 前自动检索 advisory 记忆并注入有界提示，默认关闭。
+- `TDAI_MEMORY_AUTO_WRITEBACK` — 可选，opt-in；开启后已完成 turn 的结果会异步写回 memory，默认关闭。
 
 ------
 
@@ -226,7 +238,7 @@ Bridge 不自动替 supervisor 做这种 retry。
 
 ### 环境要求
 
-- Windows 或 macOS
+- Windows、macOS 或 Linux
 - Node.js 24+
 - 官方 Codex executable
   - 可以直接通过 `codex` 找到；
@@ -516,10 +528,10 @@ npm run smoke:live
 
 - `src/mcp.ts` — MCP stdio / JSON-RPC boundary
 - `src/app-server.ts` — native Codex app-server process / protocol adapter
-- `src/tools.ts` — 9 tools、schema 与 supervisory semantics
+- `src/tools.ts` — 11 tools、schema 与 supervisory semantics
 - `src/runtime.ts` — bounded live runtime state / events / pending requests
 - `src/checkpoint.ts` — optional supervisory checkpoint
-- `src/platform.ts` — Windows / macOS platform boundary
+- `src/platform.ts` — Windows / macOS / Linux platform boundary
 - `src/version.ts` — canonical Bridge version
 - `src/ux-projection.ts` — optional UX projection / compatibility
 - `windows/` — optional Windows Tray

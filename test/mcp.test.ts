@@ -118,7 +118,7 @@ async function initialize(client: TestClient, id: RpcId): Promise<void> {
   assert.equal(response.error, undefined);
 }
 
-test("MCP stdio initializes idempotently and lists exactly nine fully annotated tools", async () => {
+test("MCP stdio initializes idempotently and lists exactly eleven fully annotated tools", async () => {
   const client = new TestClient();
   try {
     const initializeLine = JSON.stringify({
@@ -198,6 +198,8 @@ test("MCP stdio initializes idempotently and lists exactly nine fully annotated 
       "codex_respond",
       "codex_interrupt",
       "codex_checkpoint",
+      "memory_search",
+      "memory_record_turn",
     ]);
     for (const tool of tools) {
       assert.equal(typeof tool.title, "string");
@@ -234,6 +236,24 @@ test("MCP stdio initializes idempotently and lists exactly nine fully annotated 
     assert.match(
       checkpointTool?.description as string,
       /Before final acceptance of a checkpointed task, read it once/,
+    );
+    const memorySearch = tools.find((tool) => tool.name === "memory_search");
+    assert.equal(
+      (memorySearch?.annotations as Record<string, unknown>).readOnlyHint,
+      true,
+    );
+    assert.equal(
+      (memorySearch?.annotations as Record<string, unknown>).idempotentHint,
+      true,
+    );
+    const memoryRecordTurn = tools.find((tool) => tool.name === "memory_record_turn");
+    assert.equal(
+      (memoryRecordTurn?.annotations as Record<string, unknown>).readOnlyHint,
+      false,
+    );
+    assert.equal(
+      (memoryRecordTurn?.annotations as Record<string, unknown>).idempotentHint,
+      false,
     );
   } finally {
     assert.equal(await client.close(), 0);

@@ -1,5 +1,12 @@
 import { AppServerManager } from "./app-server.js";
 import {
+  CompletedWriteback,
+  readMemoryPolicy,
+  recallForFreshRun,
+  type MemoryPort,
+  type RecallAcknowledgement,
+} from "@ouzuiki/worker-memory-contract";
+import {
   CHECKPOINT_TEXT_LIMIT,
   CHECKPOINT_THREAD_ID_LIMIT,
   CheckpointStore,
@@ -7,9 +14,11 @@ import {
 import {
   MAX_OBSERVE_WAIT_MS,
   sanitizeForTransport,
+  type TerminalNotification,
   type RpcId,
 } from "./runtime.js";
 import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
+import type { MemoryCoreClient } from "./memory-core-client.js";
 
 export interface ToolDefinition {
   name: string;
@@ -67,6 +76,17 @@ const MAX_MODEL_CATALOG_PAGES = 100;
 const MAX_MODEL_CATALOG_ENTRIES = 10_000;
 const MAX_RATE_LIMIT_ENTRIES = 100;
 const MAX_RESET_CREDIT_ENTRIES = 20;
+
+interface MemoryRecallResult {
+  text: string;
+  acknowledgement: RecallAcknowledgement;
+}
+
+interface PendingMemoryWriteback {
+  threadId: string;
+  turnId: string;
+  handle: CompletedWriteback;
+}
 
 interface ModelListPage {
   data: Record<string, unknown>[];
@@ -495,6 +515,71 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: false,
+    },
+  },
+  {
+    name: "memory_search",
+    title: "Search Advisory Memory",
+    description:
+      "Search advisory L1 memory from TencentDB MemoryCore. Recalled memory is not authoritative project truth; verify Git/DB/docs/contracts when correctness depends on it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: { type: "string", minLength: 1, maxLength: 200 },
+        agent_id: { type: "string", minLength: 1, maxLength: 200 },
+        user_id: { type: "string", minLength: 1, maxLength: 200 },
+        session_id: { type: "string", minLength: 1, maxLength: 500 },
+        query: { type: "string", minLength: 1, maxLength: 10_000 },
+        limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+        type: { type: "string", minLength: 1, maxLength: 100 },
+      },
+      required: ["team_id", "agent_id", "user_id", "session_id", "query"],
+      additionalProperties: false,
+    },
+    annotations: {
+      title: "Search Advisory Memory",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: "memory_record_turn",
+    title: "Record Conversation Context",
+    description:
+      "Record raw L0 conversation or verified execution context for asynchronous memory extraction. This does not create authoritative project truth or directly create L1 memory.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: { type: "string", minLength: 1, maxLength: 200 },
+        agent_id: { type: "string", minLength: 1, maxLength: 200 },
+        user_id: { type: "string", minLength: 1, maxLength: 200 },
+        session_id: { type: "string", minLength: 1, maxLength: 500 },
+        messages: {
+          type: "array",
+          minItems: 1,
+          maxItems: 100,
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", enum: ["user", "assistant"] },
+              content: { type: "string", minLength: 1, maxLength: 200_000 },
+            },
+            required: ["role", "content"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["team_id", "agent_id", "user_id", "session_id", "messages"],
+      additionalProperties: false,
+    },
+    annotations: {
+      title: "Record Conversation Context",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
     },
   },
 ] as const;
@@ -967,15 +1052,53 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+type MemoryClientLike = Pick<MemoryCoreClient, "atomicSearch" | "conversationAdd">;
+
 export class ControlSurface {
   private checkpoints: CheckpointStore | undefined;
+
+  private readonly memoryClient: MemoryClientLike | undefined;
+  private readonly pendingMemoryWritebacks = new Map<string, PendingMemoryWriteback>();
 
   constructor(
     private readonly appServer: AppServerManager,
     checkpoints?: CheckpointStore,
     private readonly platformPolicy: PlatformPolicy = platformPolicyFor(),
+    memoryClient?: MemoryClientLike,
   ) {
     this.checkpoints = checkpoints;
+    this.memoryClient = memoryClient;
+    this.appServer.runtime?.onTerminal?.((notification) => this.#onTerminal(notification));
+  }
+
+  #memoryPort(): MemoryPort {
+    return {
+      atomicSearch: async (input) => (await this.#getMemoryClient()).atomicSearch(input),
+      conversationAdd: async (input) => (await this.#getMemoryClient()).conversationAdd(input),
+    };
+  }
+
+  #onTerminal(notification: TerminalNotification): void {
+    const key = notification.terminal.turn_id;
+    const pending = this.pendingMemoryWritebacks.get(key);
+    if (!pending || pending.threadId !== notification.threadId) return;
+    this.pendingMemoryWritebacks.delete(key);
+    if (notification.terminal.status !== "completed" || !notification.terminal.final_result) {
+      void pending.handle.skip();
+      this.appServer.runtime.setMemoryWritebackStatus(notification.threadId, key, "skipped");
+      return;
+    }
+    this.appServer.runtime.setMemoryWritebackStatus(notification.threadId, key, "queued");
+    void this.#writeMemory(pending, notification.terminal.final_result);
+  }
+
+  async #writeMemory(pending: PendingMemoryWriteback, finalResult: string): Promise<void> {
+    const status = await pending.handle.complete(finalResult);
+    this.appServer.runtime.setMemoryWritebackStatus(
+      pending.threadId,
+      pending.turnId,
+      status === "disabled" ? "skipped" : status,
+    );
   }
 
   #cwd(args: Record<string, unknown>): string | undefined {
@@ -1004,9 +1127,84 @@ export class ControlSurface {
         return await this.#interrupt(args);
       case "codex_checkpoint":
         return this.#checkpoint(args);
+      case "memory_search":
+        return await this.#memorySearch(args);
+      case "memory_record_turn":
+        return await this.#memoryRecordTurn(args);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
+  }
+
+  async #getMemoryClient(): Promise<MemoryClientLike> {
+    if (this.memoryClient) {
+      return this.memoryClient;
+    }
+    const gatewayKey = process.env.TDAI_GATEWAY_API_KEY?.trim();
+    if (!gatewayKey) {
+      throw new Error("TencentDB memory is not configured: TDAI_GATEWAY_API_KEY is missing");
+    }
+    const { MemoryCoreClient } = await import("./memory-core-client.js");
+    return new MemoryCoreClient({
+      gatewayKey,
+      baseUrl: process.env.TDAI_MEMORY_CORE_URL?.trim() || "http://127.0.0.1:8420",
+      serviceId: process.env.TDAI_MEMORY_SERVICE_ID?.trim() || "local-memory-core",
+    });
+  }
+
+  async #memorySearch(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["team_id", "agent_id", "user_id", "session_id", "query", "limit", "type"]);
+    const result = await (await this.#getMemoryClient()).atomicSearch({
+      teamId: requiredString(args, "team_id", 200).trim(),
+      agentId: requiredString(args, "agent_id", 200).trim(),
+      userId: requiredString(args, "user_id", 200).trim(),
+      sessionId: requiredString(args, "session_id", 500).trim(),
+      query: requiredString(args, "query", 10_000).trim(),
+      limit: optionalInteger(args, "limit", 1, 100) ?? 20,
+      ...(args.type === undefined
+        ? {}
+        : { type: requiredString(args, "type", 100).trim() }),
+    });
+    return { source: "tencentdb_memory_l1", advisory: true, items: result.items };
+  }
+
+  async #memoryRecordTurn(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["team_id", "agent_id", "user_id", "session_id", "messages"]);
+    if (!Array.isArray(args.messages) || args.messages.length < 1 || args.messages.length > 100) {
+      throw new Error("messages must contain from 1 to 100 items");
+    }
+    const messages = args.messages.map((value, index) => {
+      const message = asObject(value, `messages[${index}]`);
+      onlyKeys(message, ["role", "content"]);
+      const role = enumValue(message, "role", ["user", "assistant"] as const);
+      if (!role) {
+        throw new Error(`messages[${index}].role is required`);
+      }
+      const content = requiredString(message, "content", 200_000);
+      return { role, content };
+    });
+    const result = await (await this.#getMemoryClient()).conversationAdd({
+      teamId: requiredString(args, "team_id", 200).trim(),
+      agentId: requiredString(args, "agent_id", 200).trim(),
+      userId: requiredString(args, "user_id", 200).trim(),
+      sessionId: requiredString(args, "session_id", 500).trim(),
+      messages,
+    });
+    return {
+      source: "tencentdb_memory_l0",
+      accepted_count: result.acceptedIds.length,
+      pipeline_async: true,
+    };
+  }
+
+  async #autoRecall(text: string, requestedThreadId: string | undefined, cwd: string | undefined): Promise<MemoryRecallResult> {
+    const recalled = await recallForFreshRun({
+      originalTask: text,
+      cwd: cwd ?? "",
+      resumed: requestedThreadId !== undefined,
+      client: this.#memoryPort(),
+    });
+    return { text: recalled.effectiveTask, acknowledgement: recalled.acknowledgement };
   }
 
   #checkpoint(args: Record<string, unknown>): unknown {
@@ -1263,6 +1461,7 @@ export class ControlSurface {
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
     const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
     await this.#validateExecutionOverrides(model, effort);
+    const memoryRecall = await this.#autoRecall(text, requestedThreadId, cwd);
     const overrides = {
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
@@ -1293,7 +1492,7 @@ export class ControlSurface {
     this.appServer.runtime.ensureThread(threadId);
     const turnResult = await this.appServer.request("turn/start", {
       threadId,
-      input: [{ type: "text", text, text_elements: [] }],
+      input: [{ type: "text", text: memoryRecall.text, text_elements: [] }],
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
@@ -1302,6 +1501,17 @@ export class ControlSurface {
     });
     const turnId = extractTurnId(turnResult, "turn/start");
     this.appServer.runtime.markTurnAccepted(threadId, turnId);
+    if (readMemoryPolicy().writebackEnabled && cwd) {
+      this.pendingMemoryWritebacks.set(turnId, {
+        threadId,
+        turnId,
+        handle: new CompletedWriteback({ originalTask: text, cwd, client: this.#memoryPort() }),
+      });
+      const terminal = this.appServer.runtime.observe(threadId, undefined, 1)?.terminal;
+      if (terminal?.turn_id === turnId) {
+        this.#onTerminal({ threadId, terminal });
+      }
+    }
     const turn = asObject(turnResult, "turn/start result").turn as Record<string, unknown>;
     return {
       accepted: true,
@@ -1309,6 +1519,7 @@ export class ControlSurface {
       turn_id: turnId,
       event_cursor: this.appServer.runtime.currentCursor(threadId),
       status: typeof turn.status === "string" ? turn.status : "inProgress",
+      memory_recall: memoryRecall.acknowledgement,
     };
   }
 
