@@ -4,6 +4,8 @@
 
 Local Codex Bridge is a thin MCP stdio control surface for native Codex sessions, with a shared Windows/macOS/Linux core and optional platform-specific surfaces. Its purpose is to let ChatGPT or another MCP client supervise official Codex threads without creating a second task system, transcript store, queue, retry loop, or authority layer.
 
+This repo does not own Supervisor/tri-bridge policy (worker selection/fallback/quota/health/acceptance/handoff); see [`WORKER-NEUTRAL.md`](WORKER-NEUTRAL.md) for where that canonically lives.
+
 Keep the bridge thin. Native Codex owns persistent threads, turns, history, final messages, and execution capabilities. Bridge-owned state is limited to bounded live supervision data, pending requests, terminal snapshots, optional bounded checkpoints, and the optional UX projection.
 
 ## Architecture

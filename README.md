@@ -537,6 +537,8 @@ npm run smoke:live
 - `windows/` — optional Windows Tray
 - `launcher/`, `bin/`, `Start Mac Codex Bridge.app` — optional macOS integration
 
+Supervisor/tri-bridge 的 worker-neutral 合约与工具（选路/配额/健康判断/验收/跨 worker 交接）不在本仓库，见 [`WORKER-NEUTRAL.md`](WORKER-NEUTRAL.md)。
+
 ------
 
 ## License
