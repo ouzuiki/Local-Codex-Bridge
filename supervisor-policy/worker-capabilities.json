@@ -1,12 +1,14 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "owner": "supervisor",
   "contract": "Tri-Bridge Contract v1",
-  "as_of": "2026-09-04",
+  "routing_policy": "Worker Cost/Capability Routing Policy CR1 v0",
+  "as_of": "2026-09-05",
   "workers": {
     "claude": {
       "bridge": "LClB",
       "role": "primary-quality-worker",
+      "default_role_v0": "expert_review_scarce",
       "capabilities": {
         "control_contract_v1": true,
         "coding": true,
@@ -19,7 +21,8 @@
         "quota_probe": false,
         "post_run_cost": true,
         "post_run_usage": true,
-        "native_persistent_thread_inventory": false
+        "native_persistent_thread_inventory": false,
+        "extension_capability": false
       },
       "evidence": [
         "Local-Claude-Bridge/src/tools.ts",
@@ -29,6 +32,7 @@
     "codex": {
       "bridge": "LCB",
       "role": "quality-fallback-and-codex-native-worker",
+      "default_role_v0": "engineering_default",
       "capabilities": {
         "control_contract_v1": true,
         "coding": true,
@@ -41,7 +45,8 @@
         "quota_probe": true,
         "post_run_cost": false,
         "post_run_usage": false,
-        "native_persistent_thread_inventory": true
+        "native_persistent_thread_inventory": true,
+        "extension_capability": false
       },
       "evidence": [
         "Local-Codex-Bridge/src/tools.ts"
@@ -50,6 +55,7 @@
     "pi": {
       "bridge": "LPB",
       "role": "economy-and-bounded-scope-worker",
+      "default_role_v0": "specialized_extension",
       "capabilities": {
         "control_contract_v1": true,
         "coding": true,
@@ -62,7 +68,8 @@
         "quota_probe": false,
         "post_run_cost": true,
         "post_run_usage": true,
-        "native_persistent_thread_inventory": false
+        "native_persistent_thread_inventory": false,
+        "extension_capability": true
       },
       "evidence": [
         "Local-Pi-Bridge/src/mcp-adapter.js",

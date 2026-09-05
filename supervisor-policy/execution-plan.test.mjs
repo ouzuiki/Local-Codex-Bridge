@@ -11,10 +11,10 @@ const available = {
   },
 };
 
-test("quality task composes a ready Claude plan with native Skills and no production Skill router", () => {
-  const plan = buildExecutionPlan({ state: available, policy: { budget_mode: "quality" } });
+test("default general-engineering task composes a ready Codex plan with native Skills and no production Skill router", () => {
+  const plan = buildExecutionPlan({ state: available });
   assert.equal(plan.action, "ready");
-  assert.equal(plan.worker, "claude");
+  assert.equal(plan.worker, "codex");
   assert.equal(plan.execution_allowed, true);
   assert.deepEqual(plan.context.skills, {
     owner: "native_worker",
@@ -25,11 +25,20 @@ test("quality task composes a ready Claude plan with native Skills and no produc
   assert.equal(plan.context.memory_transport_required, false);
 });
 
-test("economy task still delegates Worker choice to P2", () => {
+test("expert-review task with evidence ready still delegates Worker choice to the CR1/CR2 policy", () => {
+  const plan = buildExecutionPlan({
+    task: { task_class: "expert_review", evidence_ready: true },
+    state: available,
+  });
+  assert.equal(plan.action, "ready");
+  assert.equal(plan.worker, "claude");
+  assert.deepEqual(plan.fallback_chain, ["codex", "pi"]);
+});
+
+test("a deprecated budget_mode input is accepted but no longer changes Worker ordering", () => {
   const plan = buildExecutionPlan({ state: available, policy: { budget_mode: "economy" } });
   assert.equal(plan.action, "ready");
-  assert.equal(plan.worker, "pi");
-  assert.deepEqual(plan.fallback_chain, ["claude", "codex"]);
+  assert.equal(plan.worker, "codex");
 });
 
 test("active HITL is held before any new execution is allowed", () => {

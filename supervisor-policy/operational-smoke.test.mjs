@@ -14,9 +14,8 @@ const available = {
 
 test("operational contract smoke: task -> selection -> memory/context -> acceptance -> P3 final gate", () => {
   const plan = buildExecutionPlan({
-    task: { mode: "coding" },
+    task: { mode: "coding", task_class: "expert_review", evidence_ready: true },
     state: available,
-    policy: { budget_mode: "quality" },
     context: {
       project_contract_present: true,
       native_session_active: false,
