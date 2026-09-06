@@ -111,6 +111,21 @@ interface ThreadRuntime {
   events: RuntimeEvent[];
   terminal: TerminalSnapshot | null;
   agentText: string;
+  semanticState: "productive" | "reasoning_only";
+  lastProductiveAt: string | null;
+  lastProductiveCursor: number | null;
+  latestReasoningTokens: number;
+  reasoningTokenBaseline: number;
+  reasoningActive: boolean;
+}
+
+export interface SemanticProgress {
+  semantic_state: "productive" | "blocked" | "reasoning_only";
+  last_productive_at: string | null;
+  last_productive_cursor: number | null;
+  thinking_tokens_since_productive: number;
+  reasoning_active: boolean;
+  reasoning_telemetry: "supported";
 }
 
 export interface RuntimeObservation {
@@ -128,6 +143,7 @@ export interface RuntimeObservation {
   has_more: boolean;
   pending_requests: unknown[];
   terminal: TerminalSnapshot | null;
+  semantic_progress: SemanticProgress;
 }
 
 interface SanitizeOptions {
@@ -419,6 +435,82 @@ function extractFinalFromTurn(params: unknown): string | undefined {
   return undefined;
 }
 
+const PRODUCTIVE_ITEM_TYPES = new Set([
+  "agentMessage",
+  "commandExecution",
+  "fileChange",
+  "mcpToolCall",
+  "dynamicToolCall",
+  "toolCall",
+]);
+
+function itemType(params: unknown): string | undefined {
+  return stringField(asRecord(asRecord(params)?.item), "type");
+}
+
+function isReasoningNotification(method: string, params: unknown): boolean {
+  return itemType(params) === "reasoning" || method.startsWith("item/reasoning/");
+}
+
+function isProductiveNotification(method: string, params: unknown): boolean {
+  if (
+    method === "turn/started" ||
+    method === "turn/completed" ||
+    method === "item/agentMessage/delta"
+  ) {
+    return true;
+  }
+  if (
+    (method === "item/started" || method === "item/completed") &&
+    PRODUCTIVE_ITEM_TYPES.has(itemType(params) ?? "")
+  ) {
+    return true;
+  }
+  const lower = method.toLowerCase();
+  const productiveFamily = [
+    "item/commandexecution/",
+    "item/filechange/",
+    "item/mcptoolcall/",
+    "item/dynamictoolcall/",
+    "item/toolcall/",
+  ].some((prefix) => lower.startsWith(prefix));
+  return productiveFamily &&
+    (lower.includes("progress") || lower.includes("output") || lower.endsWith("/delta"));
+}
+
+function reasoningTokenTotal(params: unknown): number | undefined {
+  const tokenUsage = asRecord(asRecord(params)?.tokenUsage);
+  const total = asRecord(tokenUsage?.total);
+  const value = total?.reasoningOutputTokens;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function redactReasoningPayload(method: string, params: unknown): unknown {
+  if (!isReasoningNotification(method, params)) {
+    return params;
+  }
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) {
+      return value.map(visit);
+    }
+    const record = asRecord(value);
+    if (!record) {
+      return value;
+    }
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (["content", "delta", "summary", "text"].includes(key)) {
+        continue;
+      }
+      output[key] = visit(child);
+    }
+    return output;
+  };
+  return visit(params);
+}
+
 export class RuntimeStore {
   readonly #threads = new Map<string, ThreadRuntime>();
   readonly #pending = new Map<string, PendingServerRequest>();
@@ -469,6 +561,12 @@ export class RuntimeStore {
         events: [],
         terminal: null,
         agentText: "",
+        semanticState: "productive",
+        lastProductiveAt: null,
+        lastProductiveCursor: null,
+        latestReasoningTokens: 0,
+        reasoningTokenBaseline: 0,
+        reasoningActive: false,
       });
     }
   }
@@ -847,6 +945,7 @@ export class RuntimeStore {
       transport: { bounded: true, sanitized: true },
     }));
     const nextCursor = rawEvents.at(-1)?.cursor ?? Math.min(Math.max(effective, 0), current);
+    const pendingRequests = this.pendingForThread(threadId);
     return {
       runtime_available: true,
       runtime_status: runtime.status,
@@ -860,8 +959,19 @@ export class RuntimeStore {
       cursor_floor: Math.max(0, firstAvailable - 1),
       cursor_lost: cursorLost,
       has_more: available.length > rawEvents.length,
-      pending_requests: this.pendingForThread(threadId),
+      pending_requests: pendingRequests,
       terminal: runtime.terminal,
+      semantic_progress: {
+        semantic_state: pendingRequests.length > 0 ? "blocked" : runtime.semanticState,
+        last_productive_at: runtime.lastProductiveAt,
+        last_productive_cursor: runtime.lastProductiveCursor,
+        thinking_tokens_since_productive: Math.max(
+          0,
+          runtime.latestReasoningTokens - runtime.reasoningTokenBaseline,
+        ),
+        reasoning_active: runtime.reasoningActive,
+        reasoning_telemetry: "supported",
+      },
     };
   }
 
@@ -983,15 +1093,55 @@ export class RuntimeStore {
       at: new Date().toISOString(),
       method,
       category: classifyEvent(method),
-      data: sanitizeForTransport(data, EVENT_SANITIZE),
+      data: sanitizeForTransport(redactReasoningPayload(method, data), EVENT_SANITIZE),
       ...(turnId ? { turn_id: turnId } : {}),
     };
     runtime.nextCursor += 1;
+    this.#foldSemanticProgress(runtime, event, data);
     runtime.events.push(event);
     if (runtime.events.length > this.ringLimit) {
       runtime.events.splice(0, runtime.events.length - this.ringLimit);
     }
     this.#signalChange(runtime);
+  }
+
+  #foldSemanticProgress(runtime: ThreadRuntime, event: RuntimeEvent, rawData: unknown): void {
+    const total = reasoningTokenTotal(rawData);
+    if (total !== undefined) {
+      if (total < runtime.latestReasoningTokens) {
+        runtime.reasoningTokenBaseline = 0;
+      }
+      runtime.latestReasoningTokens = total;
+      if (
+        event.method === "thread/tokenUsage/updated" &&
+        runtime.semanticState === "productive" &&
+        !runtime.reasoningActive
+      ) {
+        runtime.reasoningTokenBaseline = total;
+      }
+    }
+
+    if (isProductiveNotification(event.method, rawData)) {
+      runtime.semanticState = "productive";
+      runtime.lastProductiveAt = event.at;
+      runtime.lastProductiveCursor = event.cursor;
+      runtime.reasoningActive = false;
+      runtime.reasoningTokenBaseline = runtime.latestReasoningTokens;
+      return;
+    }
+
+    if (event.method.startsWith("item/reasoning/")) {
+      runtime.semanticState = "reasoning_only";
+      runtime.reasoningActive = true;
+      return;
+    }
+
+    if (event.method === "item/started" && itemType(rawData) === "reasoning") {
+      runtime.semanticState = "reasoning_only";
+      runtime.reasoningActive = true;
+    } else if (event.method === "item/completed" && itemType(rawData) === "reasoning") {
+      runtime.reasoningActive = false;
+    }
   }
 
   #signalChange(runtime: ThreadRuntime): void {

@@ -66,6 +66,259 @@ test("sanitizer redacts obvious secrets and bounds strings", () => {
   assert.match(result.text as string, /truncated/);
 });
 
+test("runtime derives exact live semantic progress and redacts reasoning text", () => {
+  const runtime = new RuntimeStore();
+  runtime.ensureThread("thread-semantic");
+  assert.deepEqual(runtime.observe("thread-semantic", 0, 100)?.semantic_progress, {
+    semantic_state: "productive",
+    last_productive_at: null,
+    last_productive_cursor: null,
+    thinking_tokens_since_productive: 0,
+    reasoning_active: false,
+    reasoning_telemetry: "supported",
+  });
+
+  runtime.recordNotification("item/started", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    item: {
+      id: "reasoning-1",
+      type: "reasoning",
+      summary: ["PRIVATE_REASONING_SUMMARY"],
+      content: [{ text: "PRIVATE_REASONING_CONTENT" }],
+    },
+  });
+  let observed = runtime.observe("thread-semantic", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, true);
+
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    tokenUsage: { total: { reasoningOutputTokens: 12 } },
+  });
+  assert.equal(runtime.observe("thread-semantic", 0, 100)?.semantic_progress.thinking_tokens_since_productive, 12);
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    tokenUsage: { total: { reasoningOutputTokens: 28 } },
+  });
+  assert.equal(runtime.observe("thread-semantic", 0, 100)?.semantic_progress.thinking_tokens_since_productive, 28);
+
+  runtime.recordNotification("item/agentMessage/delta", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    itemId: "message-1",
+    delta: "visible answer",
+  });
+  observed = runtime.observe("thread-semantic", 0, 100)!;
+  const productiveEvent = observed.events.at(-1)!;
+  assert.deepEqual(observed.semantic_progress, {
+    semantic_state: "productive",
+    last_productive_at: productiveEvent.at,
+    last_productive_cursor: productiveEvent.cursor,
+    thinking_tokens_since_productive: 0,
+    reasoning_active: false,
+    reasoning_telemetry: "supported",
+  });
+
+  runtime.recordNotification("item/started", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    item: { id: "reasoning-2", type: "reasoning" },
+  });
+  runtime.recordNotification("item/reasoning/summaryTextDelta", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    itemId: "reasoning-2",
+    delta: "PRIVATE_REASONING_DELTA",
+  });
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    tokenUsage: { total: { reasoningOutputTokens: 38 } },
+  });
+  observed = runtime.observe("thread-semantic", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, true);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 10);
+  assert.doesNotMatch(JSON.stringify(observed.events), /PRIVATE_REASONING/);
+  assert.match(JSON.stringify(observed.events), /"reasoningOutputTokens":38/);
+
+  runtime.recordNotification("item/completed", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+    item: { id: "reasoning-2", type: "reasoning", summary: ["PRIVATE_COMPLETED_SUMMARY"] },
+  });
+  observed = runtime.observe("thread-semantic", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, false);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 10);
+
+  runtime.recordNotification("metadata/updated", {
+    threadId: "thread-semantic",
+    turnId: "turn-semantic",
+  });
+  assert.equal(runtime.observe("thread-semantic", 0, 100)?.semantic_progress.semantic_state, "reasoning_only");
+
+  for (const type of ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall"]) {
+    runtime.recordNotification("item/started", {
+      threadId: "thread-semantic",
+      turnId: "turn-semantic",
+      item: { id: `work-${type}`, type },
+    });
+    observed = runtime.observe("thread-semantic", 0, 100)!;
+    let event = observed.events.at(-1)!;
+    assert.equal(observed.semantic_progress.semantic_state, "productive");
+    assert.equal(observed.semantic_progress.last_productive_cursor, event.cursor);
+    assert.equal(observed.semantic_progress.last_productive_at, event.at);
+
+    runtime.recordNotification("item/completed", {
+      threadId: "thread-semantic",
+      turnId: "turn-semantic",
+      item: { id: `work-${type}`, type },
+    });
+    observed = runtime.observe("thread-semantic", 0, 100)!;
+    event = observed.events.at(-1)!;
+    assert.equal(observed.semantic_progress.last_productive_cursor, event.cursor);
+    assert.equal(observed.semantic_progress.last_productive_at, event.at);
+  }
+});
+
+test("delayed reasoning token accounting is absorbed after productive work", () => {
+  const runtime = new RuntimeStore();
+  const threadId = "thread-delayed-reasoning-tokens";
+  const turnId = "turn-delayed-reasoning-tokens";
+  runtime.ensureThread(threadId);
+
+  runtime.recordNotification("turn/started", {
+    threadId,
+    turn: { id: turnId, status: "inProgress" },
+  });
+  runtime.recordNotification("item/started", {
+    threadId,
+    turnId,
+    item: { id: "reasoning-1", type: "reasoning" },
+  });
+  runtime.recordNotification("item/completed", {
+    threadId,
+    turnId,
+    item: { id: "reasoning-1", type: "reasoning" },
+  });
+  runtime.recordNotification("item/completed", {
+    threadId,
+    turnId,
+    item: { id: "command-1", type: "commandExecution" },
+  });
+
+  let observed = runtime.observe(threadId, 0, 100)!;
+  const commandEvent = observed.events.at(-1)!;
+  assert.equal(observed.semantic_progress.semantic_state, "productive");
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 0);
+  assert.equal(observed.semantic_progress.last_productive_cursor, commandEvent.cursor);
+  assert.equal(observed.semantic_progress.last_productive_at, commandEvent.at);
+
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId,
+    turnId,
+    tokenUsage: { total: { reasoningOutputTokens: 43 } },
+  });
+  observed = runtime.observe(threadId, 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "productive");
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 0);
+  assert.equal(observed.semantic_progress.last_productive_cursor, commandEvent.cursor);
+  assert.equal(observed.semantic_progress.last_productive_at, commandEvent.at);
+
+  runtime.recordNotification("item/started", {
+    threadId,
+    turnId,
+    item: { id: "reasoning-2", type: "reasoning" },
+  });
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId,
+    turnId,
+    tokenUsage: { total: { reasoningOutputTokens: 53 } },
+  });
+  observed = runtime.observe(threadId, 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, true);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 10);
+
+  runtime.recordNotification("item/completed", {
+    threadId,
+    turnId,
+    item: { id: "reasoning-2", type: "reasoning" },
+  });
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId,
+    turnId,
+    tokenUsage: { total: { reasoningOutputTokens: 58 } },
+  });
+  observed = runtime.observe(threadId, 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, false);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 15);
+});
+
+test("blocked semantic precedence preserves underlying reasoning and turn baselines", () => {
+  const runtime = new RuntimeStore();
+  runtime.ensureThread("thread-blocked");
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-blocked",
+    turnId: "turn-1",
+    tokenUsage: { total: { reasoningOutputTokens: 100 } },
+  });
+  runtime.recordNotification("turn/started", {
+    threadId: "thread-blocked",
+    turn: { id: "turn-2", status: "inProgress" },
+  });
+  assert.equal(runtime.observe("thread-blocked", 0, 100)?.semantic_progress.thinking_tokens_since_productive, 0);
+  runtime.recordNotification("item/started", {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+    item: { id: "reasoning-blocked", type: "reasoning" },
+  });
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+    tokenUsage: { total: { reasoningOutputTokens: 115 } },
+  });
+  runtime.recordServerRequest(91, "item/commandExecution/requestApproval", {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+  });
+  let observed = runtime.observe("thread-blocked", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "blocked");
+  assert.equal(observed.semantic_progress.reasoning_active, true);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 15);
+
+  runtime.recordNotification("item/reasoning/textDelta", {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+    itemId: "reasoning-blocked",
+    delta: "PRIVATE_WHILE_BLOCKED",
+  });
+  runtime.recordNotification("thread/tokenUsage/updated", {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+    tokenUsage: { total: { reasoningOutputTokens: 121 } },
+  });
+  observed = runtime.observe("thread-blocked", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "blocked");
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 21);
+
+  const pending = runtime.claimPending(91, {
+    threadId: "thread-blocked",
+    turnId: "turn-2",
+    method: "item/commandExecution/requestApproval",
+  });
+  runtime.completePending(pending);
+  observed = runtime.observe("thread-blocked", 0, 100)!;
+  assert.equal(observed.semantic_progress.semantic_state, "reasoning_only");
+  assert.equal(observed.semantic_progress.reasoning_active, true);
+  assert.equal(observed.semantic_progress.thinking_tokens_since_productive, 21);
+});
+
 test("runtime ring uses monotonic cursors, scopes pending raw ids, and captures terminal output", () => {
   const runtime = new RuntimeStore(2);
   runtime.markTurnAccepted("thread-1", "turn-1");
@@ -534,6 +787,8 @@ test("completed, pending, inactive, and unavailable observe states do not wait",
     wait_ms: MAX_OBSERVE_WAIT_MS,
   }));
   assert.equal((unavailable as Record<string, unknown>).runtime_available, false);
+  assert.equal((unavailable as Record<string, unknown>).semantic_progress, null);
+  assert.equal((unavailable as Record<string, unknown>).semantic_progress_reconstructable, false);
 });
 
 test("observe wait schema and validation preserve bounded optional semantics", async () => {
