@@ -1,6 +1,7 @@
 import { sanitizeForTransport, type RpcId } from "./runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS, TOOL_NAMES } from "./tools.js";
 import { VERSION } from "./version.js";
+import type { Readable, Writable } from "node:stream";
 
 const JSONRPC_VERSION = "2.0";
 const LATEST_PROTOCOL_VERSION = "2025-11-25";
@@ -106,6 +107,8 @@ function initializeMismatch(
 
 export interface McpStdioServerOptions {
   onClose: () => void | Promise<void>;
+  input?: Readable;
+  output?: Writable;
 }
 
 export class McpStdioServer {
@@ -114,6 +117,8 @@ export class McpStdioServer {
   readonly #requestControllers = new Map<string, AbortController>();
   readonly #control: ControlSurface;
   readonly #onClose: () => void | Promise<void>;
+  readonly #input: Readable;
+  readonly #output: Writable;
 
   #buffer = Buffer.alloc(0);
   #initializeResult: Record<string, unknown> | null = null;
@@ -124,14 +129,16 @@ export class McpStdioServer {
   constructor(control: ControlSurface, options: McpStdioServerOptions) {
     this.#control = control;
     this.#onClose = options.onClose;
+    this.#input = options.input ?? process.stdin;
+    this.#output = options.output ?? process.stdout;
   }
 
   start(): void {
-    process.stdin.on("data", this.#onData);
-    process.stdin.once("end", this.#onInputClose);
-    process.stdin.once("close", this.#onInputClose);
-    process.stdin.once("error", this.#onInputError);
-    process.stdin.resume();
+    this.#input.on("data", this.#onData);
+    this.#input.once("end", this.#onInputClose);
+    this.#input.once("close", this.#onInputClose);
+    this.#input.once("error", this.#onInputError);
+    this.#input.resume();
   }
 
   async close(): Promise<void> {
@@ -140,11 +147,11 @@ export class McpStdioServer {
     }
     this.#closing = true;
     this.#abortActiveRequests();
-    process.stdin.off("data", this.#onData);
-    process.stdin.off("end", this.#onInputClose);
-    process.stdin.off("close", this.#onInputClose);
-    process.stdin.off("error", this.#onInputError);
-    process.stdin.pause();
+    this.#input.off("data", this.#onData);
+    this.#input.off("end", this.#onInputClose);
+    this.#input.off("close", this.#onInputClose);
+    this.#input.off("error", this.#onInputError);
+    this.#input.pause();
     await this.#writeChain.catch(() => undefined);
   }
 
@@ -386,11 +393,11 @@ export class McpStdioServer {
   async #write(message: unknown): Promise<void> {
     const payload = `${JSON.stringify(message)}\n`;
     const write = async (): Promise<void> => {
-      if (!process.stdout.writable) {
-        throw new Error("MCP stdout is not writable");
+      if (!this.#output.writable) {
+        throw new Error("MCP output is not writable");
       }
       await new Promise<void>((resolve, reject) => {
-        process.stdout.write(payload, "utf8", (error?: Error | null) => {
+        this.#output.write(payload, "utf8", (error?: Error | null) => {
           if (error) {
             reject(error);
           } else {
