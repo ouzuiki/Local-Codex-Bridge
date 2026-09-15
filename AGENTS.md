@@ -6,7 +6,7 @@ Local Codex Bridge is a thin MCP stdio control surface for native Codex sessions
 
 This repo does not own Supervisor/tri-bridge policy (worker selection/fallback/quota/health/acceptance/handoff); see [`WORKER-NEUTRAL.md`](WORKER-NEUTRAL.md) for where that canonically lives.
 
-Keep the bridge thin. Native Codex owns persistent threads, turns, history, final messages, and execution capabilities. Bridge-owned state is limited to bounded live supervision data, pending requests, terminal snapshots, optional bounded checkpoints, and the optional UX projection.
+Keep the bridge thin. Native Codex owns persistent threads, turns, history, final messages, and execution capabilities. Bridge-owned state is limited to bounded live supervision data, pending requests, terminal snapshots, and the optional UX projection.
 
 ## Architecture
 
@@ -18,9 +18,9 @@ MCP client -> Local Codex Bridge (JSON-RPC stdio)
            -> native Codex sessions
 ```
 
-`src/mcp.ts` owns the MCP boundary, `src/app-server.ts` owns the official child-process protocol, `src/tools.ts` owns the public tool contract, and `src/runtime.ts` owns ephemeral live state. `src/checkpoint.ts` provides the separate optional local checkpoint store. The Windows Tray and Secure MCP Tunnel integration are optional layers; the Tunnel itself is external to this repository.
+`src/mcp.ts` owns the MCP boundary, `src/app-server.ts` owns the official child-process protocol, `src/tools.ts` owns the public tool contract, and `src/runtime.ts` owns ephemeral live state. The Windows Tray and Secure MCP Tunnel integration are optional layers; the Tunnel itself is external to this repository.
 
-The eleven public tools have distinct semantics:
+The ten public tools have distinct semantics:
 
 - `codex_threads`: list/search/read persistent native threads; filters are not access control.
 - `codex_models`: read one bounded current `model/list` page on demand; it creates no catalog cache or current-model registry.
@@ -29,7 +29,6 @@ The eleven public tools have distinct semantics:
 - `codex_steer`: exceptional semantic correction to the exact active turn; do not use it for routine progress supervision, as a timer, or as a retry.
 - `codex_respond`: answer one real pending app-server request using its raw ID and exact scope.
 - `codex_interrupt`: exceptional explicit cancellation or safety/recovery control for one exact native turn; it is not process control or a progress timer.
-- `codex_checkpoint`: maintain optional bounded supervisor cognition metadata; it is not a transcript or lifecycle database.
 - `memory_search`: search advisory L1 memory from an external TencentDB MemoryCore gateway; results are advisory, never authoritative project truth.
 - `memory_record_turn`: record raw L0 conversation/execution context for asynchronous memory extraction; it does not itself create L1 memory.
 
@@ -62,7 +61,7 @@ Prefer evidence from the current source, tests, package metadata, and actual mac
 A rebuild or install should demonstrate, as applicable:
 
 - dependency installation, type checking, build, and the regular automated test suite succeed;
-- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the eleven intended tools;
+- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the ten intended tools;
 - the official app-server executable is resolved and launched with the expected stdio arguments;
 - persistent native history and ephemeral Bridge state remain clearly separated;
 - no author-specific path, credential, Tunnel profile, port, or secret has entered the repository or generic setup;

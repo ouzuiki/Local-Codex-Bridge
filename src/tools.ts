@@ -7,11 +7,6 @@ import {
   type RecallAcknowledgement,
 } from "@ouzuiki/worker-memory-contract";
 import {
-  CHECKPOINT_TEXT_LIMIT,
-  CHECKPOINT_THREAD_ID_LIMIT,
-  CheckpointStore,
-} from "./checkpoint.js";
-import {
   MAX_OBSERVE_WAIT_MS,
   sanitizeForTransport,
   type TerminalNotification,
@@ -421,99 +416,6 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
-      openWorldHint: false,
-    },
-  },
-  {
-    name: "codex_checkpoint",
-    title: "Checkpoint Codex Supervision",
-    description:
-      "Optional, bounded supervisor cognition memory keyed to one native Codex thread_id; the key is not a permanent task identity and does not require future work to remain on that thread. Use it to protect the original goal, constraints, and acceptance plus concise supervisor state during long or complex supervision when context dilution or goal drift makes an external anchor worthwhile. Initialization is not tied to crossing a ChatGPT window or round, starting another Codex turn, or switching native threads; initialize early when a task is already expected to be sufficiently long or complex for that protection. Do not use for one-shot work, and do not turn duration into a hard threshold: elapsed time, observe/poll count, token count, or mere silence are not automatic triggers. Later updates remain semantic-event driven and require a material change in understanding or root cause, constraint or scope interpretation, steering decision, user-authorized amendment or effective goal, or acceptance judgment or an explicit decision not to accept yet. Before final acceptance of a checkpointed task, read it once to re-anchor the original goal, constraints, acceptance, and current supervisor frame. This tool is optional and uncoupled from all other tools. Store concise supervisor summaries only; never prompts, transcripts, raw events, command output, final answers, or raw event streams. Updates preserve only immutable original plus bounded previous/current supervisor state.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: ["read", "update"],
-          description:
-            "Read the checkpoint, or initialize/update it at a material supervisor decision point.",
-        },
-        thread_id: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_THREAD_ID_LIMIT,
-          description: "Native Codex thread id; no second task identifier is created.",
-        },
-        original_goal: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description:
-            "Concise original user goal. Required only on initialization and immutable thereafter.",
-        },
-        original_constraints: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description:
-            "Concise original constraints. Required only on initialization and immutable thereafter.",
-        },
-        original_acceptance: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description:
-            "Concise original acceptance criteria. Required only on initialization and immutable thereafter.",
-        },
-        effective_goal: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description:
-            "Current effective goal after legitimate user amendments; defaults to original_goal on initialization.",
-        },
-        current_amendment: {
-          oneOf: [
-            { type: "string", minLength: 1, maxLength: CHECKPOINT_TEXT_LIMIT },
-            { type: "null" },
-          ],
-          description:
-            "Latest concise user-authorized requirement amendment, or null to clear it, without changing the immutable original.",
-        },
-        current_understanding: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description: "Current concise root-cause or task understanding.",
-        },
-        current_decision: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description: "Current supervisor decision and why it matters.",
-        },
-        acceptance_status: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description:
-            "Concise acceptance assessment, not a task lifecycle or job status.",
-        },
-        next_step: {
-          type: "string",
-          minLength: 1,
-          maxLength: CHECKPOINT_TEXT_LIMIT,
-          description: "Single next supervision step.",
-        },
-      },
-      required: ["action", "thread_id"],
-      additionalProperties: false,
-    },
-    annotations: {
-      title: "Checkpoint Codex Supervision",
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
       openWorldHint: false,
     },
   },
@@ -1055,18 +957,15 @@ function throwIfAborted(signal?: AbortSignal): void {
 type MemoryClientLike = Pick<MemoryCoreClient, "atomicSearch" | "conversationAdd">;
 
 export class ControlSurface {
-  private checkpoints: CheckpointStore | undefined;
-
   private readonly memoryClient: MemoryClientLike | undefined;
   private readonly pendingMemoryWritebacks = new Map<string, PendingMemoryWriteback>();
 
   constructor(
     private readonly appServer: AppServerManager,
-    checkpoints?: CheckpointStore,
+    _retiredCheckpointStore?: never,
     private readonly platformPolicy: PlatformPolicy = platformPolicyFor(),
     memoryClient?: MemoryClientLike,
   ) {
-    this.checkpoints = checkpoints;
     this.memoryClient = memoryClient;
     this.appServer.runtime?.onTerminal?.((notification) => this.#onTerminal(notification));
   }
@@ -1125,8 +1024,6 @@ export class ControlSurface {
         return await this.#respond(args);
       case "codex_interrupt":
         return await this.#interrupt(args);
-      case "codex_checkpoint":
-        return this.#checkpoint(args);
       case "memory_search":
         return await this.#memorySearch(args);
       case "memory_record_turn":
@@ -1205,94 +1102,6 @@ export class ControlSurface {
       client: this.#memoryPort(),
     });
     return { text: recalled.effectiveTask, acknowledgement: recalled.acknowledgement };
-  }
-
-  #checkpoint(args: Record<string, unknown>): unknown {
-    const fields = [
-      "action",
-      "thread_id",
-      "original_goal",
-      "original_constraints",
-      "original_acceptance",
-      "effective_goal",
-      "current_amendment",
-      "current_understanding",
-      "current_decision",
-      "acceptance_status",
-      "next_step",
-    ] as const;
-    onlyKeys(args, fields);
-    const action = enumValue(args, "action", ["read", "update"] as const);
-    if (!action) {
-      throw new Error("action is required");
-    }
-    const threadId = requiredString(args, "thread_id", CHECKPOINT_THREAD_ID_LIMIT).trim();
-    if (action === "read") {
-      onlyKeys(args, ["action", "thread_id"]);
-      const checkpoint = this.#checkpointStore().read(threadId);
-      return checkpoint === null
-        ? {
-            source: "local_codex_bridge_checkpoint",
-            found: false,
-            thread_id: threadId,
-            checkpoint: null,
-          }
-        : {
-            source: "local_codex_bridge_checkpoint",
-            found: true,
-            operation: "read",
-            checkpoint,
-          };
-    }
-
-    let currentAmendment: string | null | undefined;
-    if (args.current_amendment === null) {
-      currentAmendment = null;
-    } else {
-      currentAmendment = optionalString(
-        args,
-        "current_amendment",
-        CHECKPOINT_TEXT_LIMIT,
-      );
-    }
-    const result = this.#checkpointStore().update(threadId, {
-      original_goal: optionalString(args, "original_goal", CHECKPOINT_TEXT_LIMIT),
-      original_constraints: optionalString(
-        args,
-        "original_constraints",
-        CHECKPOINT_TEXT_LIMIT,
-      ),
-      original_acceptance: optionalString(
-        args,
-        "original_acceptance",
-        CHECKPOINT_TEXT_LIMIT,
-      ),
-      effective_goal: optionalString(args, "effective_goal", CHECKPOINT_TEXT_LIMIT),
-      current_amendment: currentAmendment,
-      current_understanding: optionalString(
-        args,
-        "current_understanding",
-        CHECKPOINT_TEXT_LIMIT,
-      ),
-      current_decision: optionalString(args, "current_decision", CHECKPOINT_TEXT_LIMIT),
-      acceptance_status: optionalString(
-        args,
-        "acceptance_status",
-        CHECKPOINT_TEXT_LIMIT,
-      ),
-      next_step: optionalString(args, "next_step", CHECKPOINT_TEXT_LIMIT),
-    });
-    return {
-      source: "local_codex_bridge_checkpoint",
-      found: true,
-      operation: result.operation,
-      checkpoint: result.checkpoint,
-    };
-  }
-
-  #checkpointStore(): CheckpointStore {
-    this.checkpoints ??= new CheckpointStore();
-    return this.checkpoints;
   }
 
   async #threads(args: Record<string, unknown>): Promise<unknown> {

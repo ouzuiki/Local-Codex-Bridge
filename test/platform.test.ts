@@ -40,66 +40,6 @@ test("Windows, Darwin, and Linux cwd policies are explicit peers", () => {
   assert.equal(platformPolicyFor("linux"), LINUX_PLATFORM_POLICY);
 });
 
-test("checkpoint defaults remain platform-native and Windows alone preserves its legacy default", () => {
-  const canonicalWindows = createWindowsPlatformPolicy(
-    () => ({ status: 0 }),
-    () => false,
-  );
-  assert.equal(
-    canonicalWindows.resolveDefaultCheckpointDirectory(
-      { LOCALAPPDATA: "D:\\Local" },
-      "D:\\Users\\Example",
-    ),
-    "D:\\Local\\LocalCodexBridge\\checkpoints",
-  );
-
-  const legacyPath = "D:\\Local\\Lumen\\CodexControlV2\\checkpoints";
-  const legacyWindows = createWindowsPlatformPolicy(
-    () => ({ status: 0 }),
-    (candidate) => candidate === legacyPath,
-  );
-  assert.equal(
-    legacyWindows.resolveDefaultCheckpointDirectory(
-      { LOCALAPPDATA: "D:\\Local" },
-      "D:\\Users\\Example",
-    ),
-    legacyPath,
-  );
-
-  assert.equal(
-    DARWIN_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
-      { LOCALAPPDATA: "D:\\must-not-be-used" },
-      "/Users/example",
-    ),
-    "/Users/example/Library/Application Support/LocalCodexBridge/checkpoints",
-  );
-
-  assert.equal(
-    LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
-      { XDG_STATE_HOME: "/var/lib/example-state" },
-      "/home/example",
-    ),
-    "/var/lib/example-state/LocalCodexBridge/checkpoints",
-  );
-
-  assert.equal(
-    LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
-      {},
-      "/home/example",
-    ),
-    "/home/example/.local/state/LocalCodexBridge/checkpoints",
-  );
-
-  assert.throws(
-    () =>
-      LINUX_PLATFORM_POLICY.resolveDefaultCheckpointDirectory(
-        { XDG_STATE_HOME: "relative/state" },
-        "/home/example",
-      ),
-    /absolute XDG state directory/,
-  );
-});
-
 test("spawn and termination mechanisms stay platform-specific", () => {
   const invocations: Array<{
     executable: string;

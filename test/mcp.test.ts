@@ -1,15 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import type { AppServerManager } from "../src/app-server.js";
-import { CHECKPOINT_DIRECTORY_ENV } from "../src/checkpoint.js";
 import { McpStdioServer } from "../src/mcp.js";
 import { RuntimeStore } from "../src/runtime.js";
 import { ControlSurface } from "../src/tools.js";
@@ -118,7 +113,7 @@ async function initialize(client: TestClient, id: RpcId): Promise<void> {
   assert.equal(response.error, undefined);
 }
 
-test("MCP stdio initializes idempotently and lists exactly eleven fully annotated tools", async () => {
+test("MCP stdio initializes idempotently and lists exactly ten fully annotated tools", async () => {
   const client = new TestClient();
   try {
     const initializeLine = JSON.stringify({
@@ -197,7 +192,6 @@ test("MCP stdio initializes idempotently and lists exactly eleven fully annotate
       "codex_steer",
       "codex_respond",
       "codex_interrupt",
-      "codex_checkpoint",
       "memory_search",
       "memory_record_turn",
     ]);
@@ -226,16 +220,6 @@ test("MCP stdio initializes idempotently and lists exactly eleven fully annotate
     assert.equal(
       (respondTool?.annotations as Record<string, unknown>).idempotentHint,
       false,
-    );
-    const checkpointTool = tools.find((tool) => tool.name === "codex_checkpoint");
-    assert.match(
-      checkpointTool?.description as string,
-      /Initialization is not tied to crossing a ChatGPT window or round/,
-    );
-    assert.match(checkpointTool?.description as string, /Do not use for one-shot work/);
-    assert.match(
-      checkpointTool?.description as string,
-      /Before final acceptance of a checkpointed task, read it once/,
     );
     const memorySearch = tools.find((tool) => tool.name === "memory_search");
     assert.equal(
@@ -470,164 +454,6 @@ test("MCP duplicate active typed id preserves cancellation suppression and safe 
     if (stdoutDescriptor) {
       Object.defineProperty(process, "stdout", stdoutDescriptor);
     }
-  }
-});
-
-test("checkpoint preserves immutable intent and bounded state across MCP process restart", async () => {
-  const checkpointDirectory = mkdtempSync(join(tmpdir(), "local-codex-bridge-checkpoint-test-"));
-  const environment = {
-    ...process.env,
-    [CHECKPOINT_DIRECTORY_ENV]: checkpointDirectory,
-  };
-  const threadId = randomUUID();
-  let first: TestClient | undefined;
-  let second: TestClient | undefined;
-
-  try {
-    first = new TestClient(environment);
-    await initialize(first, 1);
-    const missing = successfulToolPayload(await first.request(2, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: { action: "read", thread_id: threadId },
-    }));
-    assert.deepEqual(missing, {
-      source: "local_codex_bridge_checkpoint",
-      found: false,
-      thread_id: threadId,
-      checkpoint: null,
-    });
-    assert.deepEqual(readdirSync(checkpointDirectory), []);
-
-    const initialized = successfulToolPayload(await first.request(3, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: {
-        action: "update",
-        thread_id: threadId,
-        original_goal: "Deliver the narrow checkpoint capability.",
-        original_constraints: "No database, task layer, monitoring, or production restart.",
-        original_acceptance: "Immutable intent and bounded state survive a process restart.",
-        current_understanding: "A second supervision round is required for focused validation.",
-        current_decision: "Continue only with checkpoint tests.",
-        acceptance_status: "Not accepted; persistence is not yet verified.",
-        next_step: "Run the first update and restart the MCP process.",
-      },
-    }));
-    assert.equal(initialized.operation, "initialized");
-    const initialCheckpoint = initialized.checkpoint as Record<string, unknown>;
-    assert.equal(initialCheckpoint.previous, null);
-
-    const updated = successfulToolPayload(await first.request(4, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: {
-        action: "update",
-        thread_id: threadId,
-        effective_goal: "Deliver the same checkpoint with explicit restart evidence.",
-        current_amendment: "The user allows only this experimental checkpoint feature.",
-        current_understanding: "The file write succeeded; restart recovery remains unverified.",
-        current_decision: "Restart the test MCP process before acceptance.",
-        acceptance_status: "Not accepted; restart read is pending.",
-        next_step: "Close this process and read from a fresh process.",
-      },
-    }));
-    assert.equal(updated.operation, "updated");
-    const updatedCheckpoint = updated.checkpoint as Record<string, unknown>;
-    assert.equal(
-      (updatedCheckpoint.previous as Record<string, unknown>).current_understanding,
-      "A second supervision round is required for focused validation.",
-    );
-    assert.equal(
-      (updatedCheckpoint.current as Record<string, unknown>).current_understanding,
-      "The file write succeeded; restart recovery remains unverified.",
-    );
-
-    const rejected = await first.request(5, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: {
-        action: "update",
-        thread_id: threadId,
-        original_goal: "Silently replace the original goal.",
-        current_decision: "This update must be rejected.",
-      },
-    });
-    assert.equal((rejected.result as Record<string, unknown>).isError, true);
-    assert.match(toolPayload(rejected).error as string, /original_goal is immutable/);
-
-    const firstExitCode = await first.close();
-    first = undefined;
-    assert.equal(firstExitCode, 0);
-
-    second = new TestClient(environment);
-    await initialize(second, 1);
-    const recovered = successfulToolPayload(await second.request(2, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: { action: "read", thread_id: threadId },
-    }));
-    assert.equal(recovered.found, true);
-    const recoveredCheckpoint = recovered.checkpoint as Record<string, unknown>;
-    assert.equal(
-      (recoveredCheckpoint.original as Record<string, unknown>).original_goal,
-      "Deliver the narrow checkpoint capability.",
-    );
-    assert.equal(
-      (recoveredCheckpoint.previous as Record<string, unknown>).current_understanding,
-      "A second supervision round is required for focused validation.",
-    );
-    assert.equal(
-      (recoveredCheckpoint.current as Record<string, unknown>).current_understanding,
-      "The file write succeeded; restart recovery remains unverified.",
-    );
-
-    const rotated = successfulToolPayload(await second.request(3, "tools/call", {
-      name: "codex_checkpoint",
-      arguments: {
-        action: "update",
-        thread_id: threadId,
-        current_amendment: null,
-        current_understanding: "Restart recovery is verified.",
-        current_decision: "The checkpoint behavior is ready for acceptance review.",
-        acceptance_status: "Acceptance review may proceed.",
-        next_step: "Read once before final acceptance.",
-      },
-    }));
-    const rotatedCheckpoint = rotated.checkpoint as Record<string, unknown>;
-    assert.equal(
-      (rotatedCheckpoint.previous as Record<string, unknown>).current_understanding,
-      "The file write succeeded; restart recovery remains unverified.",
-    );
-    assert.equal(
-      (rotatedCheckpoint.current as Record<string, unknown>).current_understanding,
-      "Restart recovery is verified.",
-    );
-    assert.equal(
-      (rotatedCheckpoint.current as Record<string, unknown>).current_amendment,
-      null,
-    );
-    assert.deepEqual(Object.keys(rotatedCheckpoint).sort(), [
-      "created_at",
-      "current",
-      "original",
-      "previous",
-      "schema_version",
-      "thread_id",
-      "updated_at",
-    ]);
-
-    const storedFiles = readdirSync(checkpointDirectory);
-    assert.equal(storedFiles.length, 1);
-    assert.match(storedFiles[0] ?? "", /^[a-f0-9]{64}\.json$/);
-    const stored = JSON.parse(
-      readFileSync(join(checkpointDirectory, storedFiles[0]!), "utf8"),
-    ) as Record<string, unknown>;
-    assert.equal("history" in stored, false);
-    assert.equal("events" in stored, false);
-  } finally {
-    if (first) {
-      await first.close();
-    }
-    if (second) {
-      await second.close();
-    }
-    rmSync(checkpointDirectory, { recursive: true, force: true });
   }
 });
 

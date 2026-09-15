@@ -1,5 +1,4 @@
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
-import { existsSync } from "node:fs";
 import path from "node:path";
 
 export type SupportedPlatform = "win32" | "darwin" | "linux";
@@ -20,11 +19,6 @@ export interface PlatformPolicy {
   readonly platform: SupportedPlatform;
   readonly nativeCwdDescription: string;
   validateCwd(value: string): string;
-  normalizeExplicitCheckpointDirectory(value: string): string;
-  resolveDefaultCheckpointDirectory(
-    environment: NodeJS.ProcessEnv,
-    homeDirectory: string,
-  ): string;
   appServerSpawnOptions(): AppServerSpawnPolicy;
   hasChildExited(child: ManagedChildProcess): boolean;
   softTerminateChild(child: ManagedChildProcess): void;
@@ -36,8 +30,6 @@ export type WindowsTaskkillRunner = (
   args: readonly string[],
   options: SpawnSyncOptions,
 ) => { readonly error?: Error; readonly status: number | null };
-
-type WindowsPathExists = (path: string) => boolean;
 
 function childHasExited(child: ManagedChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
@@ -76,110 +68,16 @@ function validateLinuxCwd(value: string): string {
   return path.posix.normalize(value);
 }
 
-function normalizeWindowsExplicitCheckpointDirectory(value: string): string {
-  if (!path.win32.isAbsolute(value)) {
-    throw new Error("Explicit checkpoint directory must be an absolute Windows path");
-  }
-  return path.win32.resolve(value);
-}
-
-function normalizeDarwinExplicitCheckpointDirectory(value: string): string {
-  if (!path.posix.isAbsolute(value)) {
-    throw new Error("Explicit checkpoint directory must be an absolute POSIX path on macOS");
-  }
-  return path.posix.resolve(value);
-}
-
-function normalizeLinuxExplicitCheckpointDirectory(value: string): string {
-  if (!path.posix.isAbsolute(value)) {
-    throw new Error("Explicit checkpoint directory must be an absolute POSIX path on Linux");
-  }
-  return path.posix.resolve(value);
-}
-
-function defaultWindowsCheckpointDirectory(
-  environment: NodeJS.ProcessEnv,
-  homeDirectory: string,
-  pathExists: WindowsPathExists,
-): string {
-  const localAppData = environment.LOCALAPPDATA?.trim();
-  const userProfile = environment.USERPROFILE?.trim() || homeDirectory;
-  const base = localAppData || path.win32.join(userProfile, "AppData", "Local");
-  if (!path.win32.isAbsolute(base)) {
-    throw new Error("Unable to resolve an absolute local app-data directory for checkpoints");
-  }
-  const legacyDefault = path.win32.join(
-    base,
-    "Lumen",
-    "CodexControlV2",
-    "checkpoints",
-  );
-  if (pathExists(legacyDefault)) {
-    return legacyDefault;
-  }
-  return path.win32.join(base, "LocalCodexBridge", "checkpoints");
-}
-
-function defaultDarwinCheckpointDirectory(
-  _environment: NodeJS.ProcessEnv,
-  homeDirectory: string,
-): string {
-  if (!path.posix.isAbsolute(homeDirectory)) {
-    throw new Error("Unable to resolve an absolute macOS home directory for checkpoints");
-  }
-  return path.posix.join(
-    homeDirectory,
-    "Library",
-    "Application Support",
-    "LocalCodexBridge",
-    "checkpoints",
-  );
-}
-
-function defaultLinuxCheckpointDirectory(
-  environment: NodeJS.ProcessEnv,
-  homeDirectory: string,
-): string {
-  const xdgStateHome = environment.XDG_STATE_HOME?.trim();
-
-  if (xdgStateHome) {
-    if (!path.posix.isAbsolute(xdgStateHome)) {
-      throw new Error("Unable to resolve an absolute XDG state directory for checkpoints");
-    }
-    return path.posix.join(
-      xdgStateHome,
-      "LocalCodexBridge",
-      "checkpoints",
-    );
-  }
-
-  if (!path.posix.isAbsolute(homeDirectory)) {
-    throw new Error("Unable to resolve an absolute Linux home directory for checkpoints");
-  }
-
-  return path.posix.join(
-    homeDirectory,
-    ".local",
-    "state",
-    "LocalCodexBridge",
-    "checkpoints",
-  );
-}
-
 const runTaskkill: WindowsTaskkillRunner = (executable, args, options) =>
   spawnSync(executable, [...args], options);
 
 export function createWindowsPlatformPolicy(
   taskkillRunner: WindowsTaskkillRunner = runTaskkill,
-  pathExists: WindowsPathExists = existsSync,
 ): PlatformPolicy {
   return {
     platform: "win32",
     nativeCwdDescription: "absolute Windows drive-letter path",
     validateCwd: validateWindowsCwd,
-    normalizeExplicitCheckpointDirectory: normalizeWindowsExplicitCheckpointDirectory,
-    resolveDefaultCheckpointDirectory: (environment, homeDirectory) =>
-      defaultWindowsCheckpointDirectory(environment, homeDirectory, pathExists),
     appServerSpawnOptions: () => ({ shell: false, windowsHide: true }),
     hasChildExited: childHasExited,
     softTerminateChild: (child) => {
@@ -212,8 +110,6 @@ export const DARWIN_PLATFORM_POLICY: PlatformPolicy = {
   platform: "darwin",
   nativeCwdDescription: "absolute POSIX path on macOS",
   validateCwd: validateDarwinCwd,
-  normalizeExplicitCheckpointDirectory: normalizeDarwinExplicitCheckpointDirectory,
-  resolveDefaultCheckpointDirectory: defaultDarwinCheckpointDirectory,
   appServerSpawnOptions: () => ({ shell: false }),
   hasChildExited: childHasExited,
   softTerminateChild: (child) => {
@@ -228,8 +124,6 @@ export const LINUX_PLATFORM_POLICY: PlatformPolicy = {
   platform: "linux",
   nativeCwdDescription: "absolute POSIX path on Linux",
   validateCwd: validateLinuxCwd,
-  normalizeExplicitCheckpointDirectory: normalizeLinuxExplicitCheckpointDirectory,
-  resolveDefaultCheckpointDirectory: defaultLinuxCheckpointDirectory,
   appServerSpawnOptions: () => ({ shell: false }),
   hasChildExited: childHasExited,
   softTerminateChild: (child) => {

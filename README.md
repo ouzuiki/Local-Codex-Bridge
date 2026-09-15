@@ -41,7 +41,7 @@ V2.1.3 继续收紧 Bridge 作为 supervisory adapter 的边界，并补充：
 - 公开工具描述与运行时约束的一致性；
 - 统一版本锚点与升级假设检查。
 
-Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在平台原生路径、launcher、checkpoint 默认目录、进程启动与终止等系统边界。
+Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在平台原生路径、launcher、进程启动与终止等系统边界。
 
 ------
 
@@ -81,7 +81,7 @@ Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在�
 
 ------
 
-## 11 个 MCP 工具
+## 10 个 MCP 工具
 
 | Tool               | 用途                                                         | 边界                                                         |
 | ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -93,7 +93,6 @@ Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在�
 | `codex_steer`      | 对同一个 active turn 追加语义纠正或新意图                    | 不是 timer、polling 或 retry 机制                            |
 | `codex_respond`    | 回答真实存在且 Bridge 明确支持的 approval / user-input / permission request | 必须保留原始 request id 和准确 scope；不支持 elicitation     |
 | `codex_interrupt`  | 中断准确的 active thread / turn                              | 只发送原生 interrupt，不重启 Bridge 或 app-server            |
-| `codex_checkpoint` | 保存可选、精简、有界的 supervisory anchor                    | 不是 transcript、job id 或 Codex history 的替代品            |
 | `memory_search`    | 从 TencentDB MemoryCore 检索 advisory L1 memory              | 结果是 advisory，不是权威 project truth；须自行核实 Git/DB/docs |
 | `memory_record_turn` | 记录原始 L0 对话/已验证执行上下文，供异步 memory 抽取         | 不直接创建 L1 memory，也不构成权威 project truth             |
 
@@ -402,7 +401,6 @@ Local Codex Bridge **不会创建新的操作系统 sandbox**。
 - Bridge 启动 app-server 时会继承自己的环境，但会移除 Tunnel 使用的 `CONTROL_PLANE_API_KEY`；
 - 其他环境变量仍属于可信启动边界，不应放入不必要的 secrets；
 - 实时事件和 pending request 会受到数量与内容 sanitization 限制，但 Bridge 不是 hostile multi-tenant gateway；
-- checkpoint 应保持短小，不保存完整 prompt、transcript、原始事件、命令输出或最终回答。
 
 远程使用时，应由经过认证并正确配置的 Tunnel 提供连接边界。
 
@@ -426,42 +424,6 @@ Bridge 的：
 主要存在于内存中。
 
 Bridge 重启后，`codex_observe` 可以从 native persisted history 回退恢复有限观察信息，但不会伪造已经丢失的 live state。
-
-### Checkpoint
-
-`codex_checkpoint` 是唯一刻意保存的 Bridge-side supervisory state，而且保持有界。
-
-Windows 新安装默认：
-
-```text
-%LOCALAPPDATA%\LocalCodexBridge\checkpoints\<sha256(thread_id)>.json
-```
-
-macOS 默认：
-
-```text
-~/Library/Application Support/LocalCodexBridge/checkpoints/<sha256(thread_id)>.json
-```
-
-可以通过：
-
-```text
-LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR
-```
-
-覆盖。
-
-legacy：
-
-```text
-LUMEN_CODEX_V2_CHECKPOINT_DIR
-```
-
-目前仍保留显式兼容。
-
-Bridge 不自动迁移旧 checkpoint。
-
-------
 
 ## Deliberate non-goals
 
@@ -514,7 +476,7 @@ npm run build
 npm test
 ```
 
-`npm test` 会运行共享 runtime / app-server / MCP / checkpoint / platform / shutdown / UX projection 测试，并继续执行当前平台对应的集成测试。
+`npm test` 会运行共享 runtime / app-server / MCP / platform / shutdown / UX projection 测试，并继续执行当前平台对应的集成测试。
 
 真实 Codex smoke 与普通测试刻意分开：
 
@@ -528,9 +490,8 @@ npm run smoke:live
 
 - `src/mcp.ts` — MCP stdio / JSON-RPC boundary
 - `src/app-server.ts` — native Codex app-server process / protocol adapter
-- `src/tools.ts` — 11 tools、schema 与 supervisory semantics
+- `src/tools.ts` — 10 tools、schema 与 supervisory semantics
 - `src/runtime.ts` — bounded live runtime state / events / pending requests
-- `src/checkpoint.ts` — optional supervisory checkpoint
 - `src/platform.ts` — Windows / macOS / Linux platform boundary
 - `src/version.ts` — canonical Bridge version
 - `src/ux-projection.ts` — optional UX projection / compatibility

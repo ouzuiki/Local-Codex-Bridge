@@ -70,14 +70,12 @@ async function exerciseShutdown(
 ): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), `local-codex-bridge-${mode}-`));
   const pidFile = join(directory, "app-server.pid");
-  const checkpointDirectory = join(directory, "checkpoints");
   const child = spawn(process.execPath, [bridgeEntry], {
     env: {
       ...process.env,
       CODEX_EXE: fakeCodex,
       LOCAL_CODEX_BRIDGE_FAKE_PID_FILE: pidFile,
       ...(stubbornAppServer ? { LOCAL_CODEX_BRIDGE_FAKE_STUBBORN_SHUTDOWN: "1" } : {}),
-      LOCAL_CODEX_BRIDGE_CHECKPOINT_DIR: checkpointDirectory,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
