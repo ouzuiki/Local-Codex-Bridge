@@ -26,9 +26,9 @@ The eleven public tools have distinct semantics:
 - `codex_models`: read one bounded current `model/list` page on demand; it creates no catalog cache or current-model registry.
 - `codex_turn`: create or resume a native thread and start a turn; acceptance is not completion.
 - `codex_observe`: read bounded live state or explicitly degraded persisted history after Bridge state loss.
-- `codex_steer`: append a semantic correction to the exact active turn; do not use it as a timer or retry.
+- `codex_steer`: exceptional semantic correction to the exact active turn; do not use it for routine progress supervision, as a timer, or as a retry.
 - `codex_respond`: answer one real pending app-server request using its raw ID and exact scope.
-- `codex_interrupt`: interrupt one exact native turn; it is not process control.
+- `codex_interrupt`: exceptional explicit cancellation or safety/recovery control for one exact native turn; it is not process control or a progress timer.
 - `codex_checkpoint`: maintain optional bounded supervisor cognition metadata; it is not a transcript or lifecycle database.
 - `memory_search`: search advisory L1 memory from an external TencentDB MemoryCore gateway; results are advisory, never authoritative project truth.
 - `memory_record_turn`: record raw L0 conversation/execution context for asynchronous memory extraction; it does not itself create L1 memory.

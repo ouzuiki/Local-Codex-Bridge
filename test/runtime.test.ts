@@ -804,8 +804,8 @@ test("observe wait schema and validation preserve bounded optional semantics", a
   });
   assert.match(observeTool?.description ?? "", /Optional wait_ms performs one bounded event-driven wait/);
   assert.match(observeTool?.description ?? "", /absence of new command activity alone is not evidence of a stall/);
-  assert.match(observeTool?.description ?? "", /repeated bounded-wait observe calls until terminal.*one snapshot is inProgress/);
-  assert.match(observeTool?.description ?? "", /After every wake or deadline return, inspect the newly available events\/state.*before starting the next bounded wait/);
+  assert.match(observeTool?.description ?? "", /Normal supervision lets the authorized turn run autonomously/);
+  assert.match(observeTool?.description ?? "", /Steer only for a concrete semantic correction.*interrupt only for explicit cancellation/);
 
   const runtime = new RuntimeStore();
   runtime.ensureThread("thread-validation");

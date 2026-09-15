@@ -259,7 +259,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_observe",
     title: "Observe Codex Turn",
     description:
-      "Read bounded incremental sanitized Bridge runtime events, live semantic progress, pending requests, and terminal output for a thread. Optional wait_ms performs one bounded event-driven wait only when the live turn is active and the current snapshot has nothing useful; it is not polling or stall detection. After Bridge process loss, falls back to persistent thread/read history and marks live state and semantic progress unreconstructable. A long interval with no new command or output can still mean Codex is actively reasoning; absence of new command activity alone is not evidence of a stall. When actively supervising an in-progress turn, use repeated bounded-wait observe calls until terminal unless the user explicitly pauses or stops; do not end supervision merely because one snapshot is inProgress. After every wake or deadline return, inspect the newly available events/state and decide whether steer, respond, or interruption is needed before starting the next bounded wait.",
+      "Read bounded incremental sanitized Bridge runtime events, live semantic progress, pending requests, and terminal output for a thread. Optional wait_ms performs one bounded event-driven wait only when the live turn is active and the current snapshot has nothing useful; it is not polling or stall detection. After Bridge process loss, falls back to persistent thread/read history and marks live state and semantic progress unreconstructable. A long interval with no new command or output can still mean Codex is actively reasoning; absence of new command activity alone is not evidence of a stall. Normal supervision lets the authorized turn run autonomously and observes for pending requests or completion. Steer only for a concrete semantic correction or changed intent, and interrupt only for explicit cancellation or an exceptional safety/recovery need.",
     inputSchema: {
       type: "object",
       properties: {
@@ -306,7 +306,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_steer",
     title: "Steer Active Codex Turn",
     description:
-      "Append text to the same active Codex turn using turn/steer with an expected turn-id precondition. This does not create a new turn. Do not steer merely because reasoning is taking a long time or no new command has appeared; steer only for a semantic redirect or correction based on new evidence or changed user intent. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
+      "Exceptional control: append text to the same active Codex turn using turn/steer with an expected turn-id precondition. This does not create a new turn and is not part of normal progress supervision. Do not steer merely because reasoning is taking a long time or no new command has appeared; steer only for a semantic redirect or correction based on new evidence or changed user intent. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -406,7 +406,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_interrupt",
     title: "Interrupt Codex Turn",
     description:
-      "Directly request turn/interrupt for the specified active Codex thread and turn. It does not stop or restart the Bridge or Codex app-server processes. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
+      "Exceptional control: directly request turn/interrupt for the specified active Codex thread and turn after explicit cancellation or a concrete safety/recovery need. It is not a progress timer and does not stop or restart the Bridge or Codex app-server processes. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
     inputSchema: {
       type: "object",
       properties: {
