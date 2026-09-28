@@ -20,9 +20,10 @@ MCP client -> Local Codex Bridge (JSON-RPC stdio)
 
 `src/mcp.ts` owns the MCP boundary, `src/app-server.ts` owns the official child-process protocol, `src/tools.ts` owns the public tool contract, and `src/runtime.ts` owns ephemeral live state. The Windows Tray and Secure MCP Tunnel integration are optional layers; the Tunnel itself is external to this repository.
 
-The ten public tools have distinct semantics:
+The eleven public tools have distinct semantics:
 
 - `codex_threads`: list/search/read persistent native threads; filters are not access control.
+- `codex_goal`: preserve deployed Host goal calls through a minimal durable per-thread goal record and exact reconnect receipt; this is not a checkpoint owner.
 - `codex_models`: read one bounded current `model/list` page on demand; it creates no catalog cache or current-model registry.
 - `codex_turn`: create or resume a native thread and start a turn; acceptance is not completion.
 - `codex_observe`: read bounded live state or explicitly degraded persisted history after Bridge state loss.

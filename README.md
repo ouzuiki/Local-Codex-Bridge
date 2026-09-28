@@ -81,11 +81,12 @@ Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在�
 
 ------
 
-## 10 个 MCP 工具
+## 11 个 MCP 工具
 
 | Tool               | 用途                                                         | 边界                                                         |
 | ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | `codex_threads`    | 列出、搜索、读取原生 Codex 持久线程                          | `cwd` / search 只是筛选条件，不是 ACL                        |
+| `codex_goal`       | 为现有 Host 保存绑定原生 thread 的最小 goal，并返回持久 reconnect receipt | 不恢复旧 checkpoint；不盲目重试未知结果 |
 | `codex_models`     | 按需读取一页原生 `model/list`                                | 不缓存模型目录，不维护 current-model registry                |
 | `codex_rate_limits` | 直接读取原生 `account/rateLimits/read` 额度状态               | 不启动 thread/turn、不调用模型；结果有界、净化且删除 reset-credit opaque ID |
 | `codex_turn`       | 创建或恢复原生 thread，并启动一个 turn                       | 返回 accepted 不等于任务完成；model / effort 都是可选 override |
@@ -97,6 +98,7 @@ Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在�
 | `memory_record_turn` | 记录原始 L0 对话/已验证执行上下文，供异步 memory 抽取         | 不直接创建 L1 memory，也不构成权威 project truth             |
 
 完整 schema 与运行时限制以 [`src/tools.ts`](src/tools.ts) 为准。
+现有 Host 的 v2/v3 delivery adapter 与 goal receipt 见 [`HOST-R3-COMPAT.md`](HOST-R3-COMPAT.md)。
 
 ### Memory 集成（TencentDB MemoryCore）
 
@@ -490,7 +492,8 @@ npm run smoke:live
 
 - `src/mcp.ts` — MCP stdio / JSON-RPC boundary
 - `src/app-server.ts` — native Codex app-server process / protocol adapter
-- `src/tools.ts` — 10 tools、schema 与 supervisory semantics
+- `src/tools.ts` — 11 tools、schema 与 supervisory semantics
+- `src/goal-store.ts` — durable per-thread goal and reconnect receipt
 - `src/runtime.ts` — bounded live runtime state / events / pending requests
 - `src/platform.ts` — Windows / macOS / Linux platform boundary
 - `src/version.ts` — canonical Bridge version

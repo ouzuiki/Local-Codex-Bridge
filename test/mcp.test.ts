@@ -113,7 +113,7 @@ async function initialize(client: TestClient, id: RpcId): Promise<void> {
   assert.equal(response.error, undefined);
 }
 
-test("MCP stdio initializes idempotently and lists exactly ten fully annotated tools", async () => {
+test("MCP stdio initializes idempotently and lists the native and compatibility tools", async () => {
   const client = new TestClient();
   try {
     const initializeLine = JSON.stringify({
@@ -185,6 +185,7 @@ test("MCP stdio initializes idempotently and lists exactly ten fully annotated t
     const tools = (listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
     assert.deepEqual(tools.map((tool) => tool.name), [
       "codex_threads",
+      "codex_goal",
       "codex_models",
       "codex_rate_limits",
       "codex_turn",
