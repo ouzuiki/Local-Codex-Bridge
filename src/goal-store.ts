@@ -21,11 +21,11 @@ export interface ReconnectReceipt {
 
 export interface GoalRecord {
   schema: "CodexReconnectBinding";
-  version: 2;
+  version: 3;
   threadId: string;
   id: string;
   objectiveDigest: string;
-  nativeGoalId?: string;
+  nativeGoalCreatedAt: number;
   reconnect: ReconnectReceipt | null;
 }
 
@@ -57,11 +57,13 @@ export class GoalStore {
       throw error;
     }
     if (value.schema === "CodexBridgeGoalCleared" && value.version === 1 && value.threadId === threadId) return null;
-    if (!((value.schema === "CodexReconnectBinding" && value.version === 2) ||
-      (value.schema === "CodexBridgeGoal" && value.version === 1)) || value.threadId !== threadId
+    // Older bindings lack a usable native instance identity and cannot supply a receipt.
+    if (value.threadId === threadId && ((value.schema === "CodexReconnectBinding" && value.version === 2)
+      || (value.schema === "CodexBridgeGoal" && value.version === 1))) return null;
+    if (value.schema !== "CodexReconnectBinding" || value.version !== 3 || value.threadId !== threadId
       || typeof value.id !== "string" || !/^[0-9a-f-]{8,100}$/.test(value.id)
       || typeof value.objectiveDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.objectiveDigest)
-      || value.nativeGoalId !== undefined && typeof value.nativeGoalId !== "string") {
+      || !Number.isSafeInteger(value.nativeGoalCreatedAt) || (value.nativeGoalCreatedAt as number) < 0) {
       throw new Error("Stored goal binding is invalid");
     }
     const reconnect = value.reconnect as ReconnectReceipt | null;
@@ -69,9 +71,9 @@ export class GoalStore {
       || reconnect.thread_id !== threadId || reconnect.goal_digest !== value.objectiveDigest
       || !["started", "already_in_progress", "terminal", "unknown"].includes(reconnect.status)
       || reconnect.turn_id !== null && typeof reconnect.turn_id !== "string")) throw new Error("Stored reconnect receipt is invalid");
-    return { schema: "CodexReconnectBinding", version: 2, threadId,
+    return { schema: "CodexReconnectBinding", version: 3, threadId,
       id: value.id as string, objectiveDigest: value.objectiveDigest as string,
-      ...(typeof value.nativeGoalId === "string" ? { nativeGoalId: value.nativeGoalId } : {}), reconnect };
+      nativeGoalCreatedAt: value.nativeGoalCreatedAt as number, reconnect };
   }
 
   async isCleared(threadId: string): Promise<boolean> {

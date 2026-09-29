@@ -75,13 +75,13 @@ test("all current UserInput variants and turn options reach native turn/start", 
     { type: "mention", name: "file", path: "/tmp/file" },
   ];
   await surface.call("codex_turn", { thread_id: "native-thread", input, output_schema: { type: "object" },
-    turn_trigger: "host", native_turn_options: { multiAgentMode: "explicitRequestOnly", runtimeWorkspaceRoots: ["/tmp"] } });
+    turn_trigger: "host", native_turn_options: { multiAgentMode: "explicitRequestOnly", clientUserMessageId: "message-1" } });
   const turn = native.calls.find(call => call.method === "turn/start")?.params as Record<string, unknown>;
   assert.deepEqual(turn.input, input);
   assert.deepEqual(turn.outputSchema, { type: "object" });
   assert.equal(turn.turnTrigger, "host");
   assert.equal(turn.multiAgentMode, "explicitRequestOnly");
-  assert.deepEqual(turn.runtimeWorkspaceRoots, ["/tmp"]);
+  assert.equal(turn.clientUserMessageId, "message-1");
 });
 
 test("named turn-start uses an exact idle native thread without thread lifecycle replay", async () => {

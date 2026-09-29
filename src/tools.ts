@@ -296,7 +296,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         input: { type: "array", minItems: 1, maxItems: MAX_NATIVE_INPUT_ITEMS, items: { type: "object", additionalProperties: true }, description: "Native UserInput items: text, image, localImage, audio, localAudio, skill, or mention." },
         output_schema: { type: "object", additionalProperties: true },
         turn_trigger: { type: "string", minLength: 1, maxLength: 200 },
-        native_turn_options: { type: "object", additionalProperties: true, description: "Bounded 0.156 turn/start parameters, excluding authority-sensitive overrides." },
+        native_turn_options: { type: "object", additionalProperties: true, description: "Optional turn/start fields: clientUserMessageId, disabledPluginIds, personality, serviceTier, serviceTierForTurn, summary, multiAgentMode. Unavailable with delivery_action_tool. permissions, environments, runtimeWorkspaceRoots, collaborationMode, toolOutput, and additionalContext are unsupported here." },
         thread_id: {
           type: "string",
           minLength: 1,
@@ -1413,7 +1413,7 @@ export class ControlSurface {
     const outputSchema = args.output_schema === undefined ? undefined : boundedObject(args.output_schema, "output_schema");
     const turnTrigger = optionalString(args, "turn_trigger", 200);
     const nativeTurnOptions = args.native_turn_options === undefined ? {} : boundedObject(args.native_turn_options, "native_turn_options", 20_000);
-    onlyKeys(nativeTurnOptions, ["clientUserMessageId", "disabledPluginIds", "personality", "serviceTier", "serviceTierForTurn", "summary", "toolOutput", "collaborationMode", "environments", "multiAgentMode", "permissions", "runtimeWorkspaceRoots", "additionalContext"]);
+    onlyKeys(nativeTurnOptions, ["clientUserMessageId", "disabledPluginIds", "personality", "serviceTier", "serviceTierForTurn", "summary", "multiAgentMode"]);
     let deliveryVersion: 2 | 3 | undefined;
     if (args.delivery_action_tool !== undefined) {
       const boundary = asObject(args.delivery_action_tool, "delivery_action_tool");
@@ -1425,6 +1425,7 @@ export class ControlSurface {
       if (sandbox !== (deliveryVersion === 2 ? "workspace-write" : "read-only") || approvalPolicy !== "never") {
         throw new Error(`delivery_action_tool v${deliveryVersion} requires exact sandbox and never approval policy`);
       }
+      if (Object.keys(nativeTurnOptions).length !== 0) throw new Error("delivery_action_tool does not allow native_turn_options");
     }
     await this.#validateExecutionOverrides(model, effort);
     const memoryRecall = text ? await this.#autoRecall(text, requestedThreadId, cwd) : { text: "", acknowledgement: { status: "disabled" } as RecallAcknowledgement };
@@ -1533,19 +1534,25 @@ export class ControlSurface {
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
     const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
     const digest = goalDigest(nativeGoal.objective);
+    if (!Number.isSafeInteger(nativeGoal.createdAt) || (nativeGoal.createdAt as number) < 0) {
+      throw new Error("Native goal has no usable createdAt instance identity");
+    }
+    const createdAt = nativeGoal.createdAt as number;
     const prior = await this.goalStore.read(threadId);
-    const same = prior?.objectiveDigest === digest && (nativeGoal.id === undefined || prior.nativeGoalId === nativeGoal.id);
+    const same = prior?.objectiveDigest === digest && prior.nativeGoalCreatedAt === createdAt;
     if (same && prior?.reconnect) return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: prior.reconnect };
-    const record: GoalRecord = { schema: "CodexReconnectBinding", version: 2, threadId,
-      id: goalDigest(JSON.stringify([threadId, digest, nativeGoal.id ?? null])).slice(7), objectiveDigest: digest,
-      ...(typeof nativeGoal.id === "string" ? { nativeGoalId: nativeGoal.id } : {}),
+    const record: GoalRecord = { schema: "CodexReconnectBinding", version: 3, threadId,
+      id: goalDigest(JSON.stringify([threadId, digest, createdAt])).slice(7), objectiveDigest: digest,
+      nativeGoalCreatedAt: createdAt,
       reconnect: null };
     await this.goalStore.write(record);
     const unknown: ReconnectReceipt = { schema: "CodexGoalReconnectReceipt", version: 1,
       thread_id: threadId, goal_digest: digest, goal_status: nativeGoal.status === "complete" ? "complete" : "active", turn_id: null, status: "unknown" };
     if (!await this.goalStore.claim(record)) {
       const latest = await this.goalStore.read(threadId);
-      return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: latest?.reconnect ?? unknown };
+      return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal),
+        reconnect_receipt: latest?.objectiveDigest === digest && latest.nativeGoalCreatedAt === createdAt
+          ? latest.reconnect ?? unknown : unknown };
     }
     record.reconnect = unknown;
     await this.goalStore.write(record);
@@ -1573,8 +1580,10 @@ export class ControlSurface {
     let record: GoalRecord | null;
     try { record = await this.goalStore.read(threadId); }
     catch { return null; }
-    return record && record.objectiveDigest === goalDigest(String(nativeGoal.objective)) &&
-      (nativeGoal.id === undefined || record.nativeGoalId === nativeGoal.id) ? record.reconnect : null;
+    return record && record.threadId === threadId && typeof nativeGoal.objective === "string"
+      && Number.isSafeInteger(nativeGoal.createdAt) && (nativeGoal.createdAt as number) >= 0
+      && record.objectiveDigest === goalDigest(nativeGoal.objective)
+      && record.nativeGoalCreatedAt === nativeGoal.createdAt ? record.reconnect : null;
   }
 
   async #observe(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
