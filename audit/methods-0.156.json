@@ -1,0 +1,1913 @@
+{
+  "experimentalOnly": {
+    "account/bedrock/discover": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "account/bedrock/setup": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "collaborationMode/list": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "environment/add": {
+      "classification": "internal",
+      "fields": [
+        "connectTimeoutMs",
+        "environmentId",
+        "execServerUrl"
+      ],
+      "required": [
+        "environmentId",
+        "execServerUrl"
+      ]
+    },
+    "environment/info": {
+      "classification": "public-read",
+      "fields": [
+        "environmentId"
+      ],
+      "required": [
+        "environmentId"
+      ]
+    },
+    "environment/status": {
+      "classification": "public-read",
+      "fields": [
+        "environmentId"
+      ],
+      "required": [
+        "environmentId"
+      ]
+    },
+    "fuzzyFileSearch/sessionStart": {
+      "classification": "internal",
+      "fields": [
+        "roots",
+        "sessionId"
+      ],
+      "required": [
+        "roots",
+        "sessionId"
+      ]
+    },
+    "fuzzyFileSearch/sessionStop": {
+      "classification": "internal",
+      "fields": [
+        "sessionId"
+      ],
+      "required": [
+        "sessionId"
+      ]
+    },
+    "fuzzyFileSearch/sessionUpdate": {
+      "classification": "internal",
+      "fields": [
+        "query",
+        "sessionId"
+      ],
+      "required": [
+        "query",
+        "sessionId"
+      ]
+    },
+    "mcpServer/event/stream/start": {
+      "classification": "internal",
+      "fields": [
+        "_meta",
+        "arguments",
+        "name",
+        "server",
+        "subscriptionId",
+        "threadId"
+      ],
+      "required": [
+        "arguments",
+        "name",
+        "server",
+        "subscriptionId",
+        "threadId"
+      ]
+    },
+    "mcpServer/event/stream/stop": {
+      "classification": "internal",
+      "fields": [
+        "subscriptionId"
+      ],
+      "required": [
+        "subscriptionId"
+      ]
+    },
+    "memory/reset": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "memory/status": {
+      "classification": "public-read",
+      "fields": [
+        "minConsolidatedThreads"
+      ],
+      "required": []
+    },
+    "mock/experimentalMethod": {
+      "classification": "internal",
+      "fields": [
+        "value"
+      ],
+      "required": []
+    },
+    "plugin/search": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "cwds",
+        "limit",
+        "scope",
+        "searchTerm"
+      ],
+      "required": [
+        "searchTerm"
+      ]
+    },
+    "process/kill": {
+      "classification": "internal",
+      "fields": [
+        "processHandle"
+      ],
+      "required": [
+        "processHandle"
+      ]
+    },
+    "process/resizePty": {
+      "classification": "internal",
+      "fields": [
+        "processHandle",
+        "size"
+      ],
+      "required": [
+        "processHandle",
+        "size"
+      ]
+    },
+    "process/spawn": {
+      "classification": "internal",
+      "fields": [
+        "command",
+        "cwd",
+        "env",
+        "outputBytesCap",
+        "processHandle",
+        "size",
+        "streamStdin",
+        "streamStdoutStderr",
+        "timeoutMs",
+        "tty"
+      ],
+      "required": [
+        "command",
+        "cwd",
+        "processHandle"
+      ]
+    },
+    "process/writeStdin": {
+      "classification": "internal",
+      "fields": [
+        "closeStdin",
+        "deltaBase64",
+        "processHandle"
+      ],
+      "required": [
+        "processHandle"
+      ]
+    },
+    "project/create": {
+      "classification": "redesign",
+      "fields": [
+        "idempotencyKey",
+        "metadata",
+        "name",
+        "roots"
+      ],
+      "required": [
+        "idempotencyKey",
+        "name",
+        "roots"
+      ]
+    },
+    "project/delete": {
+      "classification": "redesign",
+      "fields": [
+        "projectId"
+      ],
+      "required": [
+        "projectId"
+      ]
+    },
+    "project/import": {
+      "classification": "redesign",
+      "fields": [
+        "idempotencyKey",
+        "metadata",
+        "name",
+        "roots",
+        "threads"
+      ],
+      "required": [
+        "idempotencyKey",
+        "name",
+        "roots"
+      ]
+    },
+    "project/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "sortDirection",
+        "sortKey"
+      ],
+      "required": []
+    },
+    "project/move": {
+      "classification": "redesign",
+      "fields": [
+        "beforeProjectId",
+        "projectId"
+      ],
+      "required": [
+        "projectId"
+      ]
+    },
+    "project/read": {
+      "classification": "public-read",
+      "fields": [
+        "projectId"
+      ],
+      "required": [
+        "projectId"
+      ]
+    },
+    "project/update": {
+      "classification": "redesign",
+      "fields": [
+        "metadata",
+        "name",
+        "projectId",
+        "roots"
+      ],
+      "required": [
+        "projectId"
+      ]
+    },
+    "remoteControl/client/list": {
+      "classification": "internal",
+      "fields": [
+        "cursor",
+        "environmentId",
+        "limit",
+        "order"
+      ],
+      "required": [
+        "environmentId"
+      ]
+    },
+    "remoteControl/client/revoke": {
+      "classification": "internal",
+      "fields": [
+        "clientId",
+        "environmentId"
+      ],
+      "required": [
+        "clientId",
+        "environmentId"
+      ]
+    },
+    "remoteControl/disable": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "remoteControl/enable": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "remoteControl/pairing/start": {
+      "classification": "internal",
+      "fields": [
+        "manualCode"
+      ],
+      "required": []
+    },
+    "remoteControl/pairing/status": {
+      "classification": "internal",
+      "fields": [
+        "manualPairingCode",
+        "pairingCode"
+      ],
+      "required": []
+    },
+    "remoteControl/status/read": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "rollout/compress": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "server/diagnostics": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "thread/backgroundTerminals/clean": {
+      "classification": "redesign",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/backgroundTerminals/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/backgroundTerminals/terminate": {
+      "classification": "redesign",
+      "fields": [
+        "processId",
+        "threadId"
+      ],
+      "required": [
+        "processId",
+        "threadId"
+      ]
+    },
+    "thread/decrement_elicitation": {
+      "classification": "internal",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/increment_elicitation": {
+      "classification": "internal",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/memoryMode/set": {
+      "classification": "public-action",
+      "fields": [
+        "mode",
+        "threadId"
+      ],
+      "required": [
+        "mode",
+        "threadId"
+      ]
+    },
+    "thread/queue/add": {
+      "classification": "public-action",
+      "fields": [
+        "clientUserMessageId",
+        "input",
+        "threadId"
+      ],
+      "required": [
+        "clientUserMessageId",
+        "input",
+        "threadId"
+      ]
+    },
+    "thread/queue/delete": {
+      "classification": "public-action",
+      "fields": [
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "required": [
+        "queuedSubmissionId",
+        "threadId"
+      ]
+    },
+    "thread/queue/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/queue/reorder": {
+      "classification": "public-action",
+      "fields": [
+        "queuedSubmissionIds",
+        "threadId"
+      ],
+      "required": [
+        "queuedSubmissionIds",
+        "threadId"
+      ]
+    },
+    "thread/queue/start": {
+      "classification": "public-action",
+      "fields": [
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/queue/update": {
+      "classification": "public-action",
+      "fields": [
+        "input",
+        "queuedSubmissionId",
+        "threadId"
+      ],
+      "required": [
+        "input",
+        "queuedSubmissionId",
+        "threadId"
+      ]
+    },
+    "thread/realtime/appendAudio": {
+      "classification": "internal",
+      "fields": [
+        "audio",
+        "threadId"
+      ],
+      "required": [
+        "audio",
+        "threadId"
+      ]
+    },
+    "thread/realtime/appendSpeech": {
+      "classification": "internal",
+      "fields": [
+        "text",
+        "threadId"
+      ],
+      "required": [
+        "text",
+        "threadId"
+      ]
+    },
+    "thread/realtime/appendText": {
+      "classification": "internal",
+      "fields": [
+        "role",
+        "text",
+        "threadId"
+      ],
+      "required": [
+        "text",
+        "threadId"
+      ]
+    },
+    "thread/realtime/listVoices": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "thread/realtime/start": {
+      "classification": "internal",
+      "fields": [
+        "clientManagedHandoffs",
+        "codexResponseHandoffChannelPrefixes",
+        "codexResponseHandoffMode",
+        "codexResponseItemPrefix",
+        "codexResponsesAsItems",
+        "delegationAckFiller",
+        "flushTranscriptTailOnSessionEnd",
+        "includeStartupContext",
+        "initialItems",
+        "model",
+        "outputModality",
+        "prompt",
+        "realtimeEndInstructions",
+        "realtimeSessionId",
+        "realtimeStartInstructions",
+        "threadId",
+        "transport",
+        "version",
+        "voice"
+      ],
+      "required": [
+        "outputModality",
+        "threadId"
+      ]
+    },
+    "thread/realtime/stop": {
+      "classification": "internal",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/search": {
+      "classification": "public-read",
+      "fields": [
+        "archived",
+        "cursor",
+        "limit",
+        "searchTerm",
+        "sortDirection",
+        "sortKey",
+        "sourceKinds"
+      ],
+      "required": [
+        "searchTerm"
+      ]
+    },
+    "thread/searchOccurrences": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "searchTerm",
+        "threadId"
+      ],
+      "required": [
+        "searchTerm",
+        "threadId"
+      ]
+    },
+    "thread/settings/update": {
+      "classification": "public-action",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "collaborationMode",
+        "cwd",
+        "disabledPluginIds",
+        "effort",
+        "model",
+        "multiAgentMode",
+        "permissions",
+        "personality",
+        "sandboxPolicy",
+        "serviceTier",
+        "summary",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/timeline/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "turn/settings/update": {
+      "classification": "public-action",
+      "fields": [
+        "approvalsReviewer",
+        "effort",
+        "model",
+        "serviceTier",
+        "summary",
+        "threadId",
+        "turnId"
+      ],
+      "required": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    "userVerification/cancel": {
+      "classification": "internal",
+      "fields": [
+        "requestId"
+      ],
+      "required": [
+        "requestId"
+      ]
+    },
+    "userVerification/delete": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "userVerification/enroll": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "userVerification/status": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "userVerification/verify": {
+      "classification": "internal",
+      "fields": [
+        "challenge",
+        "description",
+        "title"
+      ],
+      "required": [
+        "challenge",
+        "description",
+        "title"
+      ]
+    }
+  },
+  "experimentalOverrides": {
+    "command/exec": {
+      "fields": [
+        "command",
+        "cwd",
+        "disableOutputCap",
+        "disableTimeout",
+        "env",
+        "outputBytesCap",
+        "permissionProfile",
+        "processId",
+        "sandboxPolicy",
+        "size",
+        "streamStdin",
+        "streamStdoutStderr",
+        "timeoutMs",
+        "tty"
+      ],
+      "required": [
+        "command"
+      ]
+    },
+    "thread/fork": {
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "beforeTurnId",
+        "config",
+        "cwd",
+        "deferGoalContinuation",
+        "developerInstructions",
+        "ephemeral",
+        "excludeTurns",
+        "lastTurnId",
+        "model",
+        "modelProvider",
+        "path",
+        "permissions",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "serviceTier",
+        "threadId",
+        "threadSource"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/list": {
+      "fields": [
+        "ancestorThreadId",
+        "archived",
+        "cursor",
+        "cwd",
+        "limit",
+        "modelProviders",
+        "originators",
+        "parentThreadId",
+        "projectId",
+        "searchTerm",
+        "sectionId",
+        "sortDirection",
+        "sortKey",
+        "sourceKinds",
+        "useStateDbOnly"
+      ],
+      "required": []
+    },
+    "thread/metadata/update": {
+      "fields": [
+        "daybreakEnabled",
+        "gitInfo",
+        "projectId",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/resume": {
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "excludeTurns",
+        "history",
+        "initialTurnsPage",
+        "model",
+        "modelProvider",
+        "path",
+        "permissions",
+        "personality",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "serviceTier",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/start": {
+      "fields": [
+        "allowProviderModelFallback",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "daybreakEnabled",
+        "developerInstructions",
+        "dynamicTools",
+        "environments",
+        "ephemeral",
+        "experimentalRawEvents",
+        "historyMode",
+        "mockExperimentalField",
+        "model",
+        "modelProvider",
+        "multiAgentMode",
+        "permissions",
+        "personality",
+        "projectId",
+        "runtimeWorkspaceRoots",
+        "sandbox",
+        "selectedCapabilityRoots",
+        "serviceName",
+        "serviceTier",
+        "sessionStartSource",
+        "threadSource"
+      ],
+      "required": []
+    },
+    "turn/start": {
+      "fields": [
+        "additionalContext",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "clientUserMessageId",
+        "collaborationMode",
+        "cwd",
+        "cyberAccessProgram",
+        "disabledPluginIds",
+        "effort",
+        "environments",
+        "input",
+        "model",
+        "multiAgentMode",
+        "outputSchema",
+        "permissions",
+        "personality",
+        "responsesapiClientMetadata",
+        "runtimeWorkspaceRoots",
+        "sandboxPolicy",
+        "serviceTier",
+        "serviceTierForTurn",
+        "summary",
+        "threadId",
+        "toolOutput",
+        "turnTrigger"
+      ],
+      "required": [
+        "input",
+        "threadId"
+      ]
+    },
+    "turn/steer": {
+      "fields": [
+        "additionalContext",
+        "clientUserMessageId",
+        "expectedTurnId",
+        "input",
+        "responsesapiClientMetadata",
+        "threadId"
+      ],
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ]
+    }
+  },
+  "stable": {
+    "account/login/cancel": {
+      "classification": "internal",
+      "fields": [
+        "loginId"
+      ],
+      "required": [
+        "loginId"
+      ]
+    },
+    "account/login/start": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "account/logout": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "account/rateLimitResetCredit/consume": {
+      "classification": "internal",
+      "fields": [
+        "creditId",
+        "idempotencyKey"
+      ],
+      "required": [
+        "idempotencyKey"
+      ]
+    },
+    "account/rateLimits/read": {
+      "classification": "ergonomic",
+      "fields": [],
+      "required": []
+    },
+    "account/read": {
+      "classification": "public-read",
+      "fields": [
+        "refreshToken"
+      ],
+      "required": []
+    },
+    "account/sendAddCreditsNudgeEmail": {
+      "classification": "internal",
+      "fields": [
+        "creditType"
+      ],
+      "required": [
+        "creditType"
+      ]
+    },
+    "account/usage/read": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "account/workspaceMessages/read": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "app/installed": {
+      "classification": "public-read",
+      "fields": [
+        "forceRefresh",
+        "threadId"
+      ],
+      "required": []
+    },
+    "app/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "forceRefetch",
+        "limit",
+        "threadId"
+      ],
+      "required": []
+    },
+    "app/read": {
+      "classification": "public-read",
+      "fields": [
+        "appIds",
+        "includeTools",
+        "threadId"
+      ],
+      "required": [
+        "appIds"
+      ]
+    },
+    "command/exec": {
+      "classification": "internal",
+      "fields": [
+        "command",
+        "cwd",
+        "disableOutputCap",
+        "disableTimeout",
+        "env",
+        "outputBytesCap",
+        "processId",
+        "sandboxPolicy",
+        "size",
+        "streamStdin",
+        "streamStdoutStderr",
+        "timeoutMs",
+        "tty"
+      ],
+      "required": [
+        "command"
+      ]
+    },
+    "command/exec/resize": {
+      "classification": "internal",
+      "fields": [
+        "processId",
+        "size"
+      ],
+      "required": [
+        "processId",
+        "size"
+      ]
+    },
+    "command/exec/terminate": {
+      "classification": "internal",
+      "fields": [
+        "processId"
+      ],
+      "required": [
+        "processId"
+      ]
+    },
+    "command/exec/write": {
+      "classification": "internal",
+      "fields": [
+        "closeStdin",
+        "deltaBase64",
+        "processId"
+      ],
+      "required": [
+        "processId"
+      ]
+    },
+    "config/batchWrite": {
+      "classification": "internal",
+      "fields": [
+        "edits",
+        "expectedVersion",
+        "filePath",
+        "reloadUserConfig"
+      ],
+      "required": [
+        "edits"
+      ]
+    },
+    "config/mcpServer/reload": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "config/read": {
+      "classification": "public-read",
+      "fields": [
+        "cwd",
+        "includeLayers"
+      ],
+      "required": []
+    },
+    "config/value/write": {
+      "classification": "internal",
+      "fields": [
+        "expectedVersion",
+        "filePath",
+        "keyPath",
+        "mergeStrategy",
+        "value"
+      ],
+      "required": [
+        "keyPath",
+        "mergeStrategy",
+        "value"
+      ]
+    },
+    "configRequirements/read": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "experimentalFeature/enablement/set": {
+      "classification": "public-action",
+      "fields": [
+        "enablement"
+      ],
+      "required": [
+        "enablement"
+      ]
+    },
+    "experimentalFeature/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "required": []
+    },
+    "externalAgentConfig/detect": {
+      "classification": "internal",
+      "fields": [
+        "cwds",
+        "includeHome",
+        "maxSessionAgeDays",
+        "maxSessions",
+        "migrationSource",
+        "source"
+      ],
+      "required": []
+    },
+    "externalAgentConfig/import": {
+      "classification": "internal",
+      "fields": [
+        "migrationItems",
+        "migrationSource",
+        "providerId",
+        "source"
+      ],
+      "required": [
+        "migrationItems"
+      ]
+    },
+    "externalAgentConfig/import/readHistories": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "externalAgentConfig/import/recordHistory": {
+      "classification": "internal",
+      "fields": [
+        "itemTypeResults",
+        "providerId"
+      ],
+      "required": [
+        "itemTypeResults",
+        "providerId"
+      ]
+    },
+    "feedback/upload": {
+      "classification": "internal",
+      "fields": [
+        "classification",
+        "extraLogFiles",
+        "includeLogs",
+        "reason",
+        "tags",
+        "threadId"
+      ],
+      "required": [
+        "classification"
+      ]
+    },
+    "fs/copy": {
+      "classification": "internal",
+      "fields": [
+        "destinationPath",
+        "recursive",
+        "sourcePath"
+      ],
+      "required": [
+        "destinationPath",
+        "sourcePath"
+      ]
+    },
+    "fs/createDirectory": {
+      "classification": "internal",
+      "fields": [
+        "path",
+        "recursive"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    "fs/getMetadata": {
+      "classification": "internal",
+      "fields": [
+        "path"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    "fs/readDirectory": {
+      "classification": "internal",
+      "fields": [
+        "path"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    "fs/readFile": {
+      "classification": "internal",
+      "fields": [
+        "path"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    "fs/remove": {
+      "classification": "internal",
+      "fields": [
+        "force",
+        "path",
+        "recursive"
+      ],
+      "required": [
+        "path"
+      ]
+    },
+    "fs/unwatch": {
+      "classification": "internal",
+      "fields": [
+        "watchId"
+      ],
+      "required": [
+        "watchId"
+      ]
+    },
+    "fs/watch": {
+      "classification": "internal",
+      "fields": [
+        "path",
+        "watchId"
+      ],
+      "required": [
+        "path",
+        "watchId"
+      ]
+    },
+    "fs/writeFile": {
+      "classification": "internal",
+      "fields": [
+        "dataBase64",
+        "path"
+      ],
+      "required": [
+        "dataBase64",
+        "path"
+      ]
+    },
+    "fuzzyFileSearch": {
+      "classification": "redesign",
+      "fields": [
+        "cancellationToken",
+        "query",
+        "roots"
+      ],
+      "required": [
+        "query",
+        "roots"
+      ]
+    },
+    "hooks/list": {
+      "classification": "public-read",
+      "fields": [
+        "cwds"
+      ],
+      "required": []
+    },
+    "initialize": {
+      "classification": "internal",
+      "fields": [
+        "capabilities",
+        "clientInfo"
+      ],
+      "required": [
+        "clientInfo"
+      ]
+    },
+    "marketplace/add": {
+      "classification": "internal",
+      "fields": [
+        "refName",
+        "source",
+        "sparsePaths"
+      ],
+      "required": [
+        "source"
+      ]
+    },
+    "marketplace/remove": {
+      "classification": "internal",
+      "fields": [
+        "marketplaceName"
+      ],
+      "required": [
+        "marketplaceName"
+      ]
+    },
+    "marketplace/upgrade": {
+      "classification": "internal",
+      "fields": [
+        "marketplaceName"
+      ],
+      "required": []
+    },
+    "mcpServer/oauth/login": {
+      "classification": "internal",
+      "fields": [
+        "clientRegistration",
+        "name",
+        "scopes",
+        "threadId",
+        "timeoutSecs"
+      ],
+      "required": [
+        "name"
+      ]
+    },
+    "mcpServer/resource/read": {
+      "classification": "redesign",
+      "fields": [
+        "connectorId",
+        "originCallId",
+        "server",
+        "threadId",
+        "uri"
+      ],
+      "required": [
+        "server",
+        "uri"
+      ]
+    },
+    "mcpServer/tool/call": {
+      "classification": "internal",
+      "fields": [
+        "_meta",
+        "arguments",
+        "server",
+        "threadId",
+        "tool"
+      ],
+      "required": [
+        "server",
+        "threadId",
+        "tool"
+      ]
+    },
+    "mcpServerStatus/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "detail",
+        "limit",
+        "threadId"
+      ],
+      "required": []
+    },
+    "model/list": {
+      "classification": "ergonomic",
+      "fields": [
+        "cursor",
+        "includeHidden",
+        "limit"
+      ],
+      "required": []
+    },
+    "modelProvider/capabilities/read": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "permissionProfile/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "cwd",
+        "limit"
+      ],
+      "required": []
+    },
+    "plugin/install": {
+      "classification": "internal",
+      "fields": [
+        "installAttemptId",
+        "marketplacePath",
+        "pluginName",
+        "remoteMarketplaceName"
+      ],
+      "required": [
+        "pluginName"
+      ]
+    },
+    "plugin/installed": {
+      "classification": "public-read",
+      "fields": [
+        "cwds",
+        "installSuggestionPluginNames"
+      ],
+      "required": []
+    },
+    "plugin/list": {
+      "classification": "public-read",
+      "fields": [
+        "cwds",
+        "forceRefetch",
+        "marketplaceKinds"
+      ],
+      "required": []
+    },
+    "plugin/read": {
+      "classification": "public-read",
+      "fields": [
+        "marketplacePath",
+        "pluginName",
+        "remoteMarketplaceName"
+      ],
+      "required": [
+        "pluginName"
+      ]
+    },
+    "plugin/reconcile": {
+      "classification": "internal",
+      "fields": [
+        "reason"
+      ],
+      "required": []
+    },
+    "plugin/share/checkout": {
+      "classification": "internal",
+      "fields": [
+        "remotePluginId"
+      ],
+      "required": [
+        "remotePluginId"
+      ]
+    },
+    "plugin/share/delete": {
+      "classification": "internal",
+      "fields": [
+        "remotePluginId"
+      ],
+      "required": [
+        "remotePluginId"
+      ]
+    },
+    "plugin/share/list": {
+      "classification": "internal",
+      "fields": [],
+      "required": []
+    },
+    "plugin/share/save": {
+      "classification": "internal",
+      "fields": [
+        "discoverability",
+        "pluginPath",
+        "remotePluginId",
+        "shareTargets"
+      ],
+      "required": [
+        "pluginPath"
+      ]
+    },
+    "plugin/share/updateTargets": {
+      "classification": "internal",
+      "fields": [
+        "discoverability",
+        "remotePluginId",
+        "shareTargets"
+      ],
+      "required": [
+        "discoverability",
+        "remotePluginId",
+        "shareTargets"
+      ]
+    },
+    "plugin/skill/read": {
+      "classification": "public-read",
+      "fields": [
+        "remoteMarketplaceName",
+        "remotePluginId",
+        "skillName"
+      ],
+      "required": [
+        "remoteMarketplaceName",
+        "remotePluginId",
+        "skillName"
+      ]
+    },
+    "plugin/uninstall": {
+      "classification": "internal",
+      "fields": [
+        "pluginId"
+      ],
+      "required": [
+        "pluginId"
+      ]
+    },
+    "review/start": {
+      "classification": "public-action",
+      "fields": [
+        "delivery",
+        "target",
+        "threadId"
+      ],
+      "required": [
+        "target",
+        "threadId"
+      ]
+    },
+    "skills/config/write": {
+      "classification": "public-action",
+      "fields": [
+        "enabled",
+        "name",
+        "path"
+      ],
+      "required": [
+        "enabled"
+      ]
+    },
+    "skills/extraRoots/set": {
+      "classification": "public-action",
+      "fields": [
+        "extraRoots"
+      ],
+      "required": [
+        "extraRoots"
+      ]
+    },
+    "skills/list": {
+      "classification": "public-read",
+      "fields": [
+        "cwds",
+        "forceReload"
+      ],
+      "required": []
+    },
+    "thread/approveGuardianDeniedAction": {
+      "classification": "internal",
+      "fields": [
+        "event",
+        "threadId"
+      ],
+      "required": [
+        "event",
+        "threadId"
+      ]
+    },
+    "thread/archive": {
+      "classification": "public-action",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/attachment/add": {
+      "classification": "public-action",
+      "fields": [
+        "attachmentType",
+        "identityKey",
+        "payload",
+        "threadId"
+      ],
+      "required": [
+        "attachmentType",
+        "identityKey",
+        "payload",
+        "threadId"
+      ]
+    },
+    "thread/attachment/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/attachment/remove": {
+      "classification": "public-action",
+      "fields": [
+        "attachmentType",
+        "identityKey",
+        "threadId"
+      ],
+      "required": [
+        "attachmentType",
+        "identityKey",
+        "threadId"
+      ]
+    },
+    "thread/compact/start": {
+      "classification": "public-action",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/delete": {
+      "classification": "public-action",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/fork": {
+      "classification": "public-action",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "ephemeral",
+        "excludeTurns",
+        "lastTurnId",
+        "model",
+        "modelProvider",
+        "sandbox",
+        "serviceTier",
+        "threadId",
+        "threadSource"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/goal/clear": {
+      "classification": "ergonomic",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/goal/get": {
+      "classification": "ergonomic",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/goal/set": {
+      "classification": "ergonomic",
+      "fields": [
+        "objective",
+        "status",
+        "threadId",
+        "tokenBudget"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/inject_items": {
+      "classification": "public-action",
+      "fields": [
+        "items",
+        "threadId"
+      ],
+      "required": [
+        "items",
+        "threadId"
+      ]
+    },
+    "thread/items/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit",
+        "sortDirection",
+        "threadId",
+        "turnId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/list": {
+      "classification": "public-read",
+      "fields": [
+        "archived",
+        "cursor",
+        "cwd",
+        "limit",
+        "modelProviders",
+        "originators",
+        "searchTerm",
+        "sectionId",
+        "sortDirection",
+        "sortKey",
+        "sourceKinds",
+        "useStateDbOnly"
+      ],
+      "required": []
+    },
+    "thread/loaded/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit"
+      ],
+      "required": []
+    },
+    "thread/metadata/update": {
+      "classification": "public-action",
+      "fields": [
+        "gitInfo",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/name/set": {
+      "classification": "public-action",
+      "fields": [
+        "name",
+        "threadId"
+      ],
+      "required": [
+        "name",
+        "threadId"
+      ]
+    },
+    "thread/read": {
+      "classification": "public-read",
+      "fields": [
+        "includeTurns",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/resume": {
+      "classification": "public-action",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "excludeTurns",
+        "model",
+        "modelProvider",
+        "personality",
+        "sandbox",
+        "serviceTier",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/revert": {
+      "classification": "public-action",
+      "fields": [
+        "beforeTurnId",
+        "threadId"
+      ],
+      "required": [
+        "beforeTurnId",
+        "threadId"
+      ]
+    },
+    "thread/section/move": {
+      "classification": "public-action",
+      "fields": [
+        "beforeThreadId",
+        "sectionId",
+        "threadId"
+      ],
+      "required": [
+        "sectionId",
+        "threadId"
+      ]
+    },
+    "thread/shellCommand": {
+      "classification": "internal",
+      "fields": [
+        "command",
+        "threadId",
+        "timeoutMs"
+      ],
+      "required": [
+        "command",
+        "threadId"
+      ]
+    },
+    "thread/start": {
+      "classification": "public-action",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "baseInstructions",
+        "config",
+        "cwd",
+        "developerInstructions",
+        "ephemeral",
+        "model",
+        "modelProvider",
+        "personality",
+        "sandbox",
+        "serviceName",
+        "serviceTier",
+        "sessionStartSource",
+        "threadSource"
+      ],
+      "required": []
+    },
+    "thread/turns/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "itemsView",
+        "limit",
+        "sortDirection",
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/unarchive": {
+      "classification": "public-action",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "thread/unsubscribe": {
+      "classification": "public-action",
+      "fields": [
+        "threadId"
+      ],
+      "required": [
+        "threadId"
+      ]
+    },
+    "threadSection/create": {
+      "classification": "public-action",
+      "fields": [
+        "appearance",
+        "name"
+      ],
+      "required": [
+        "name"
+      ]
+    },
+    "threadSection/delete": {
+      "classification": "public-action",
+      "fields": [
+        "sectionId"
+      ],
+      "required": [
+        "sectionId"
+      ]
+    },
+    "threadSection/list": {
+      "classification": "public-read",
+      "fields": [
+        "cursor",
+        "limit"
+      ],
+      "required": []
+    },
+    "threadSection/update": {
+      "classification": "public-action",
+      "fields": [
+        "appearance",
+        "name",
+        "sectionId"
+      ],
+      "required": [
+        "name",
+        "sectionId"
+      ]
+    },
+    "turn/interrupt": {
+      "classification": "ergonomic",
+      "fields": [
+        "threadId",
+        "turnId"
+      ],
+      "required": [
+        "threadId",
+        "turnId"
+      ]
+    },
+    "turn/start": {
+      "classification": "ergonomic",
+      "fields": [
+        "approvalPolicy",
+        "approvalsReviewer",
+        "clientUserMessageId",
+        "cwd",
+        "disabledPluginIds",
+        "effort",
+        "input",
+        "model",
+        "outputSchema",
+        "personality",
+        "sandboxPolicy",
+        "serviceTier",
+        "serviceTierForTurn",
+        "summary",
+        "threadId",
+        "toolOutput",
+        "turnTrigger"
+      ],
+      "required": [
+        "input",
+        "threadId"
+      ]
+    },
+    "turn/steer": {
+      "classification": "ergonomic",
+      "fields": [
+        "clientUserMessageId",
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ],
+      "required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ]
+    },
+    "windowsSandbox/readiness": {
+      "classification": "public-read",
+      "fields": [],
+      "required": []
+    },
+    "windowsSandbox/setupStart": {
+      "classification": "internal",
+      "fields": [
+        "cwd",
+        "mode"
+      ],
+      "required": [
+        "mode"
+      ]
+    }
+  },
+  "stableServerRequests": [
+    "account/chatgptAuthTokens/refresh",
+    "applyPatchApproval",
+    "attestation/generate",
+    "execCommandApproval",
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "item/tool/call",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request"
+  ],
+  "version": "0.156.0"
+}

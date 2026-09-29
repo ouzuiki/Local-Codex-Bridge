@@ -1,5 +1,5 @@
 import { AppServerManager } from "./app-server.js";
-import { randomUUID } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
 import { GoalStore, goalDigest, type GoalRecord, type ReconnectReceipt } from "./goal-store.js";
 import {
   CompletedWriteback,
@@ -16,6 +16,7 @@ import {
 } from "./runtime.js";
 import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
 import type { MemoryCoreClient } from "./memory-core-client.js";
+import { NATIVE_GROUPS, nativeCall, nativeInputSchema } from "./native.js";
 
 export interface ToolDefinition {
   name: string;
@@ -78,6 +79,8 @@ const SUPPORTED_RESPOND_METHODS = new Set([
   "execCommandApproval",
   "applyPatchApproval",
   "item/tool/requestUserInput",
+  "item/tool/call",
+  "mcpServer/elicitation/request",
 ]);
 
 const MODEL_LIST_PAGE_LIMIT = 100;
@@ -85,6 +88,7 @@ const MAX_MODEL_CATALOG_PAGES = 100;
 const MAX_MODEL_CATALOG_ENTRIES = 10_000;
 const MAX_RATE_LIMIT_ENTRIES = 100;
 const MAX_RESET_CREDIT_ENTRIES = 20;
+const MAX_NATIVE_INPUT_ITEMS = 100;
 
 interface MemoryRecallResult {
   text: string;
@@ -103,6 +107,13 @@ interface ModelListPage {
 }
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+  ...(["codex_native_read", "codex_native_action", "codex_experimental_read", "codex_experimental_action"] as const).map((name) => ({
+    name,
+    title: name.replaceAll("_", " "),
+    description: `Bounded ${name.includes("experimental") ? "experimental" : "stable"} native app-server ${name.endsWith("read") ? "read" : "action"} allowlist. Uses exact native method names and parameters.`,
+    inputSchema: nativeInputSchema(name),
+    annotations: { title: name, readOnlyHint: name.endsWith("read"), destructiveHint: name.endsWith("action"), idempotentHint: name.endsWith("read"), openWorldHint: false },
+  })),
   {
     name: "codex_threads",
     title: "Codex Threads",
@@ -160,13 +171,15 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     name: "codex_goal",
     title: "Codex Goal Compatibility",
-    description: "Durable goal bound to one native thread. Reconnect owns one idempotent lifecycle attempt and returns an exact receipt; unknown outcomes are never replayed.",
+    description: "Native Codex Goal is authoritative. Reconnect keeps only an idempotent receipt for an exact native thread/resume attempt; UNKNOWN is never replayed.",
     inputSchema: {
       type: "object",
       properties: {
         operation: { type: "string", enum: ["set", "get", "clear", "reconnect"] },
         thread_id: { type: "string", minLength: 1, maxLength: 200 },
-        objective: { type: "string", minLength: 1, maxLength: 200000 },
+        objective: { anyOf: [{ type: "string", minLength: 1, maxLength: 200000 }, { type: "null" }] },
+        status: { anyOf: [{ type: "string", enum: ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"] }, { type: "null" }] },
+        token_budget: { type: ["integer", "null"], minimum: 0 },
         sandbox: sandboxSchema,
         approval_policy: approvalPolicySchema,
       },
@@ -231,10 +244,46 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "codex_thread_lifecycle",
+    title: "Native Thread Lifecycle",
+    description: "Fork or compact an exact native thread, returning native acknowledgement and identity.",
+    inputSchema: { type: "object", properties: {
+      operation: { type: "string", enum: ["fork", "compact"] },
+      thread_id: { type: "string", minLength: 1, maxLength: 200 },
+    }, required: ["operation", "thread_id"], additionalProperties: false },
+    annotations: { title: "Native Thread Lifecycle", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  {
+    name: "codex_thread_start",
+    title: "Start Native Codex Thread",
+    description: "Start one persistent native thread without a turn; return its exact native ID.",
+    inputSchema: { type: "object", properties: {
+      cwd: { type: "string", minLength: 1, maxLength: 1000 },
+      model: { type: "string", minLength: 1, maxLength: 100 },
+      sandbox: sandboxSchema, approval_policy: approvalPolicySchema,
+    }, required: ["cwd"], additionalProperties: false },
+    annotations: { title: "Start Native Codex Thread", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  {
+    name: "codex_turn_start",
+    title: "Start Native Codex Turn",
+    description: "Start one turn on an exact existing idle native thread without resuming or creating a thread.",
+    inputSchema: { type: "object", properties: {
+      thread_id: { type: "string", minLength: 1, maxLength: 200 },
+      text: { type: "string", minLength: 1, maxLength: 200000 },
+      input: { type: "array", minItems: 1, maxItems: MAX_NATIVE_INPUT_ITEMS, items: { type: "object", additionalProperties: true } },
+      model: { type: "string", minLength: 1, maxLength: 100 },
+      effort: { type: "string", minLength: 1, maxLength: 32 },
+      output_schema: { type: "object", additionalProperties: true },
+      turn_trigger: { type: "string", minLength: 1, maxLength: 200 },
+    }, required: ["thread_id"], oneOf: [{ required: ["text"] }, { required: ["input"] }], additionalProperties: false },
+    annotations: { title: "Start Native Codex Turn", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  {
     name: "codex_turn",
     title: "Start or Continue Codex Turn",
     description:
-      "Start a persistent Codex thread and turn, or resume an existing thread and start a turn. Prefer continuing the same native thread when its context remains useful, but a fresh thread is allowed; thread_id is not a permanent task identity. Explicit model or effort overrides are validated against a fresh model/list catalog without caching. Effort alone is checked only against efforts advertised somewhere in that catalog; the Bridge does not infer the current thread model, so app-server remains authoritative for current-model compatibility. Returns as soon as turn/start is accepted; observe separately for events and completion. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
+      "Start or resume a native thread and start one turn with text or bounded native UserInput. A model identifier is checked against a fresh model/list page sequence; reasoning effort compatibility is decided by native Codex. Returns native acceptance, not completion. Ambiguous mutating acknowledgements are UNKNOWN and are never retried automatically.",
     inputSchema: {
       type: "object",
       properties: {
@@ -244,6 +293,10 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           maxLength: 200000,
           description: "User text passed directly to Codex as one text input item.",
         },
+        input: { type: "array", minItems: 1, maxItems: MAX_NATIVE_INPUT_ITEMS, items: { type: "object", additionalProperties: true }, description: "Native UserInput items: text, image, localImage, audio, localAudio, skill, or mention." },
+        output_schema: { type: "object", additionalProperties: true },
+        turn_trigger: { type: "string", minLength: 1, maxLength: 200 },
+        native_turn_options: { type: "object", additionalProperties: true, description: "Bounded 0.156 turn/start parameters, excluding authority-sensitive overrides." },
         thread_id: {
           type: "string",
           minLength: 1,
@@ -265,13 +318,13 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           type: "string",
           minLength: 1,
           maxLength: 32,
-          description: "Optional reasoning effort. With no model, only catalog-wide token existence is checked; current-model compatibility remains native-authoritative.",
+          description: "Optional native reasoning effort token; app-server validates compatibility.",
         },
         sandbox: sandboxSchema,
         approval_policy: approvalPolicySchema,
         delivery_action_tool: { type: "object", properties: { version: { type: "integer", enum: [2, 3] } }, required: ["version"], additionalProperties: false },
       },
-      required: ["text"],
+      oneOf: [{ required: ["text"] }, { required: ["input"] }],
       anyOf: [{ required: ["thread_id"] }, { required: ["cwd"] }],
       additionalProperties: false,
     },
@@ -334,7 +387,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_steer",
     title: "Steer Active Codex Turn",
     description:
-      "Exceptional control: append text to the same active Codex turn using turn/steer with an expected turn-id precondition. This does not create a new turn and is not part of normal progress supervision. Do not steer merely because reasoning is taking a long time or no new command has appeared; steer only for a semantic redirect or correction based on new evidence or changed user intent. If an already-sent mutating acknowledgement times out, the outcome is UNKNOWN and the request was possibly accepted; observe/read before any retry, and never directly retry it.",
+      "Exceptional control: append text or bounded native UserInput to the exact active turn using turn/steer with an expected turn-ID precondition. Use for a semantic correction or changed intent. Ambiguous acknowledgement is UNKNOWN and is never retried automatically.",
     inputSchema: {
       type: "object",
       properties: {
@@ -346,8 +399,11 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           description: "Exact active turn id required by app-server.",
         },
         text: { type: "string", minLength: 1, maxLength: 200000, description: "Additional user text." },
+        input: { type: "array", minItems: 1, maxItems: MAX_NATIVE_INPUT_ITEMS, items: { type: "object", additionalProperties: true }, description: "Native UserInput variants for the active turn." },
+        client_user_message_id: { type: "string", minLength: 1, maxLength: 200 },
       },
-      required: ["thread_id", "expected_turn_id", "text"],
+      required: ["thread_id", "expected_turn_id"],
+      oneOf: [{ required: ["text"] }, { required: ["input"] }],
       additionalProperties: false,
     },
     annotations: {
@@ -362,7 +418,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_respond",
     title: "Respond to Codex Request",
     description:
-      "Answer one currently pending app-server server request by its original raw JSON-RPC id and exact thread/method scope. Supports stable item/commandExecution/requestApproval, item/fileChange/requestApproval, item/permissions/requestApproval, and item/tool/requestUserInput contracts, plus existing legacy execCommandApproval/applyPatchApproval compatibility. Unsupported or unknown methods fail locally and remain pending; do not guess a future response contract.",
+      "Answer one currently pending app-server request by its raw JSON-RPC id and exact thread/method/turn scope, including dynamic tool calls and MCP elicitations. Unknown methods remain pending.",
     inputSchema: {
       type: "object",
       properties: {
@@ -409,7 +465,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         response: {
           type: "object",
           additionalProperties: true,
-          description: "Exact generic result object for item/tool/requestUserInput; unsupported or future methods remain pending and are rejected locally.",
+          description: "Bounded native response object for user input, dynamic tool call, or MCP elicitation.",
         },
       },
       required: ["request_id", "thread_id", "method"],
@@ -597,6 +653,36 @@ function enumValue<T extends string>(
     throw new Error(`${key} must be one of: ${values.join(", ")}`);
   }
   return value as T;
+}
+
+function boundedObject(value: unknown, label: string, maxChars = 100_000): Record<string, unknown> {
+  const object = asObject(value, label);
+  if (JSON.stringify(object).length > maxChars) throw new Error(`${label} exceeds ${maxChars} characters`);
+  return object;
+}
+
+function nativeTurnInput(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_NATIVE_INPUT_ITEMS || JSON.stringify(value).length > 500_000) {
+    throw new Error("input must be 1..100 bounded native UserInput items");
+  }
+  return value.map((raw, index) => {
+    const item = boundedObject(raw, `input[${index}]`, 210_000);
+    const type = requiredString(item, "type", 32);
+    const fields: Record<string, string[]> = {
+      text: ["type", "text", "text_elements"], image: ["type", "url", "fileId", "detail"],
+      localImage: ["type", "path", "detail"], audio: ["type", "url"],
+      localAudio: ["type", "path"], skill: ["type", "name", "path"], mention: ["type", "name", "path"],
+    };
+    if (!fields[type]) throw new Error(`input[${index}] has unsupported type`);
+    onlyKeys(item, fields[type]);
+    if (type === "image" && (item.url === undefined) === (item.fileId === undefined)) throw new Error("image requires exactly one of url or fileId");
+    for (const key of type === "text" ? ["text"] : type === "image" ? [item.url === undefined ? "fileId" : "url"] : type === "audio" ? ["url"] : type === "localImage" || type === "localAudio" ? ["path"] : ["name", "path"]) {
+      requiredString(item, key, key === "path" ? 1_000 : 200_000);
+    }
+    if (item.detail !== undefined && item.detail !== null && !["auto", "low", "high", "original"].includes(String(item.detail))) throw new Error("detail must be a native ImageDetail or null");
+    if (item.text_elements !== undefined && (!Array.isArray(item.text_elements) || item.text_elements.length > 100)) throw new Error("text_elements exceeds bound");
+    return item;
+  });
 }
 
 function responseRecord(value: unknown, method: string): Record<string, unknown> {
@@ -856,36 +942,6 @@ function modelIdentifiers(entry: Record<string, unknown>): string[] {
   );
 }
 
-function advertisedReasoningEfforts(
-  entry: Record<string, unknown>,
-): Set<string> | undefined {
-  const advertised = entry.supportedReasoningEfforts;
-  if (!Array.isArray(advertised)) {
-    return undefined;
-  }
-  const efforts = new Set<string>();
-  for (const option of advertised) {
-    if (typeof option === "string" && option.length > 0) {
-      efforts.add(option);
-      continue;
-    }
-    if (option !== null && typeof option === "object" && !Array.isArray(option)) {
-      const reasoningEffort = (option as Record<string, unknown>).reasoningEffort;
-      if (typeof reasoningEffort === "string" && reasoningEffort.length > 0) {
-        efforts.add(reasoningEffort);
-        continue;
-      }
-    }
-    return undefined;
-  }
-  return efforts;
-}
-
-function formattedEfforts(efforts: ReadonlySet<string>): string {
-  const sorted = [...efforts].sort();
-  return sorted.length > 0 ? sorted.join(", ") : "(none advertised)";
-}
-
 function extractThreadId(result: unknown, method: string): string {
   const thread = asObject(asObject(result, `${method} result`).thread, `${method} result.thread`);
   if (typeof thread.id !== "string" || thread.id.length === 0) {
@@ -1042,12 +1098,23 @@ export class ControlSurface {
   async call(name: string, rawArguments: unknown, signal?: AbortSignal): Promise<unknown> {
     const args = asObject(rawArguments ?? {});
     switch (name) {
+      case "codex_native_read":
+      case "codex_native_action":
+      case "codex_experimental_read":
+      case "codex_experimental_action":
+        return await nativeCall(this.appServer, this.platformPolicy, name, args);
       case "codex_threads":
         return await this.#threads(args);
       case "codex_models":
         return await this.#models(args);
       case "codex_rate_limits":
         return await this.#rateLimits(args);
+      case "codex_thread_start":
+        return await this.#threadStart(args);
+      case "codex_thread_lifecycle":
+        return await this.#threadLifecycle(args);
+      case "codex_turn_start":
+        return await this.#turnStart(args);
       case "codex_turn":
         return await this.#turn(args);
       case "codex_goal":
@@ -1248,7 +1315,7 @@ export class ControlSurface {
     model: string | undefined,
     effort: string | undefined,
   ): Promise<void> {
-    if (!model && !effort) {
+    if (!model) {
       return;
     }
     const catalog = await this.#fullModelCatalog();
@@ -1259,41 +1326,79 @@ export class ControlSurface {
           `Unknown model override ${JSON.stringify(model)}; current model/list catalog contains no matching id or model`,
         );
       }
-      if (!effort) {
-        return;
-      }
-      const advertised = matches.map(advertisedReasoningEfforts);
-      if (advertised.some((efforts) => efforts === undefined)) {
-        return;
-      }
-      const supported = new Set(advertised.flatMap((efforts) => [...efforts!]));
-      if (!supported.has(effort)) {
-        throw new Error(
-          `Unsupported effort ${JSON.stringify(effort)} for model ${JSON.stringify(model)}; advertised supportedReasoningEfforts: ${formattedEfforts(supported)}`,
-        );
-      }
       return;
-    }
-
-    const advertised = new Set<string>();
-    for (const entry of catalog) {
-      const efforts = advertisedReasoningEfforts(entry);
-      if (efforts) {
-        for (const candidate of efforts) {
-          advertised.add(candidate);
-        }
-      }
-    }
-    if (!advertised.has(effort!)) {
-      throw new Error(
-        `Unknown effort override ${JSON.stringify(effort)}; it is absent from all advertised supportedReasoningEfforts in the current model/list catalog. The Bridge does not infer the current thread model. Advertised efforts: ${formattedEfforts(advertised)}`,
-      );
     }
   }
 
+  async #threadLifecycle(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["operation", "thread_id"]);
+    const operation = enumValue(args, "operation", ["fork", "compact"] as const);
+    if (!operation) throw new Error("operation is required");
+    const threadId = requiredString(args, "thread_id", 200);
+    const method = operation === "fork" ? "thread/fork" : "thread/compact/start";
+    const result = responseRecord(await this.appServer.request(method, { threadId }), method);
+    if (operation === "compact") return { accepted: true, operation, thread_id: threadId, result: sanitizeForTransport(result) };
+    const forkId = extractThreadId(result, method);
+    if (forkId === threadId) throw new Error("thread/fork returned source ID; outcome requires reconciliation");
+    this.appServer.runtime.ensureThread(forkId);
+    return { accepted: true, operation, source_thread_id: threadId, thread_id: forkId, result: sanitizeForTransport(result) };
+  }
+
+  async #threadStart(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["cwd", "model", "sandbox", "approval_policy"]);
+    const cwd = this.#cwd(args);
+    if (!cwd) throw new Error("cwd is required");
+    if (!(await stat(cwd)).isDirectory() || await realpath(cwd) !== cwd) throw new Error("cwd must be an existing canonical directory");
+    const model = optionalString(args, "model", 100);
+    const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
+    const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
+    await this.#validateExecutionOverrides(model, undefined);
+    const result = await this.appServer.request("thread/start", { cwd, ephemeral: false,
+      ...(model ? { model } : {}), ...(sandbox ? { sandbox } : {}),
+      ...(approvalPolicy ? { approvalPolicy } : {}), serviceName: "local-codex-bridge" });
+    const threadId = extractThreadId(result, "thread/start");
+    const thread = asObject(asObject(result, "thread/start result").thread, "thread/start thread");
+    if (thread.cwd !== cwd || thread.ephemeral === true) throw new Error("thread/start returned an unexpected workspace or ephemeral thread; outcome requires reconciliation");
+    this.appServer.runtime.ensureThread(threadId);
+    return { accepted: true, thread_id: threadId, cwd, result: sanitizeForTransport(result) };
+  }
+
+  async #turnStart(args: Record<string, unknown>): Promise<unknown> {
+    onlyKeys(args, ["thread_id", "text", "input", "model", "effort", "output_schema", "turn_trigger"]);
+    const threadId = requiredString(args, "thread_id", 200);
+    if ((args.text === undefined) === (args.input === undefined)) throw new Error("Provide exactly one of text or input");
+    const input = args.input === undefined ? [{ type: "text", text: requiredString(args, "text"), text_elements: [] }] : nativeTurnInput(args.input);
+    const model = optionalString(args, "model", 100);
+    const effort = optionalString(args, "effort", 32);
+    const outputSchema = args.output_schema === undefined ? undefined : boundedObject(args.output_schema, "output_schema");
+    const turnTrigger = optionalString(args, "turn_trigger", 200);
+    await this.#validateExecutionOverrides(model, effort);
+    let live = this.appServer.runtime.observe(threadId, undefined, 1);
+    if (!live) {
+      const read = responseRecord(await this.appServer.request("thread/read", { threadId, includeTurns: false }), "thread/read");
+      const thread = asObject(read.thread, "thread/read thread");
+      const status = asObject(thread.status, "thread/read thread.status");
+      if (thread.id !== threadId || thread.ephemeral !== false || !["idle", "notLoaded"].includes(String(status.type))) {
+        throw new Error("Exact persistent idle thread is unavailable");
+      }
+      this.appServer.runtime.ensureThread(threadId);
+      live = this.appServer.runtime.observe(threadId, undefined, 1);
+    }
+    if (!live || live.active_turn_id || !["idle", "completed"].includes(live.runtime_status)) throw new Error("Native thread is not known idle");
+    const result = await this.appServer.request("turn/start", { threadId, input,
+      ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      ...(outputSchema ? { outputSchema } : {}), ...(turnTrigger ? { turnTrigger } : {}) });
+    const turnId = extractTurnId(result, "turn/start");
+    this.appServer.runtime.markTurnAccepted(threadId, turnId);
+    return { accepted: true, thread_id: threadId, turn_id: turnId,
+      event_cursor: this.appServer.runtime.currentCursor(threadId), result: sanitizeForTransport(result) };
+  }
+
   async #turn(args: Record<string, unknown>): Promise<unknown> {
-    onlyKeys(args, ["text", "thread_id", "cwd", "model", "effort", "sandbox", "approval_policy", "delivery_action_tool"]);
-    const text = requiredString(args, "text");
+    onlyKeys(args, ["text", "input", "thread_id", "cwd", "model", "effort", "sandbox", "approval_policy", "delivery_action_tool", "output_schema", "turn_trigger", "native_turn_options"]);
+    if ((args.text === undefined) === (args.input === undefined)) throw new Error("Provide exactly one of text or input");
+    const text = args.text === undefined ? undefined : requiredString(args, "text");
+    const structuredInput = args.input === undefined ? undefined : nativeTurnInput(args.input);
     const requestedThreadId = optionalString(args, "thread_id", 200);
     const cwd = this.#cwd(args);
     if (!requestedThreadId && !cwd) {
@@ -1305,6 +1410,10 @@ export class ControlSurface {
     const effort = optionalString(args, "effort", 32);
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
     const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
+    const outputSchema = args.output_schema === undefined ? undefined : boundedObject(args.output_schema, "output_schema");
+    const turnTrigger = optionalString(args, "turn_trigger", 200);
+    const nativeTurnOptions = args.native_turn_options === undefined ? {} : boundedObject(args.native_turn_options, "native_turn_options", 20_000);
+    onlyKeys(nativeTurnOptions, ["clientUserMessageId", "disabledPluginIds", "personality", "serviceTier", "serviceTierForTurn", "summary", "toolOutput", "collaborationMode", "environments", "multiAgentMode", "permissions", "runtimeWorkspaceRoots", "additionalContext"]);
     let deliveryVersion: 2 | 3 | undefined;
     if (args.delivery_action_tool !== undefined) {
       const boundary = asObject(args.delivery_action_tool, "delivery_action_tool");
@@ -1318,7 +1427,7 @@ export class ControlSurface {
       }
     }
     await this.#validateExecutionOverrides(model, effort);
-    const memoryRecall = await this.#autoRecall(text, requestedThreadId, cwd);
+    const memoryRecall = text ? await this.#autoRecall(text, requestedThreadId, cwd) : { text: "", acknowledgement: { status: "disabled" } as RecallAcknowledgement };
     const overrides = {
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
@@ -1352,16 +1461,19 @@ export class ControlSurface {
     this.appServer.runtime.ensureThread(threadId);
     const turnResult = await this.appServer.request("turn/start", {
       threadId,
-      input: [{ type: "text", text: memoryRecall.text, text_elements: [] }],
+      input: structuredInput ?? [{ type: "text", text: memoryRecall.text, text_elements: [] }],
       ...(cwd ? { cwd } : {}),
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
       ...(sandboxPolicy ? { sandboxPolicy } : {}),
       ...(effectiveApprovalPolicy ? { approvalPolicy: effectiveApprovalPolicy } : {}),
+      ...(outputSchema ? { outputSchema } : {}),
+      ...(turnTrigger ? { turnTrigger } : {}),
+      ...nativeTurnOptions,
     });
     const turnId = extractTurnId(turnResult, "turn/start");
     this.appServer.runtime.markTurnAccepted(threadId, turnId);
-    if (readMemoryPolicy().writebackEnabled && cwd) {
+    if (readMemoryPolicy().writebackEnabled && cwd && text) {
       this.pendingMemoryWritebacks.set(turnId, {
         threadId,
         turnId,
@@ -1386,241 +1498,83 @@ export class ControlSurface {
   }
 
   async #goal(args: Record<string, unknown>): Promise<unknown> {
-    onlyKeys(args, ["operation", "thread_id", "objective", "sandbox", "approval_policy"]);
+    onlyKeys(args, ["operation", "thread_id", "objective", "status", "token_budget", "sandbox", "approval_policy"]);
     const operation = enumValue(args, "operation", ["set", "get", "clear", "reconnect"] as const);
     if (!operation) throw new Error("operation is required");
     const threadId = requiredString(args, "thread_id", 200);
-    if (operation !== "set" && args.objective !== undefined) {
-      throw new Error("objective is valid only for set");
-    }
-    if (operation !== "reconnect" && (args.sandbox !== undefined || args.approval_policy !== undefined)) {
-      throw new Error("sandbox and approval_policy are valid only for reconnect");
-    }
     if (operation === "set") {
-      const objective = optionalString(args, "objective", 200_000);
-      const prior = await this.goalStore.read(threadId);
-      if (!objective) throw new Error("set requires objective");
-      const read = responseRecord(await this.appServer.request("thread/read", { threadId, includeTurns: false }), "thread/read");
-      if (asObject(read.thread, "thread/read thread").id !== threadId) throw new Error("thread/read returned a different thread id");
-      const nativeSet = responseRecord(await this.appServer.request("thread/goal/set", { threadId, objective }), "thread/goal/set");
-      const nativeGoal = asObject(nativeSet.goal, "thread/goal/set goal");
-      if (nativeGoal.threadId !== threadId) throw new Error("thread/goal/set returned a different thread id");
-      const changed = objective !== prior?.objective;
-      const record: GoalRecord = { schema: "CodexBridgeGoal", version: 1, threadId,
-        id: changed || !prior ? randomUUID() : prior.id,
-        objective,
-        objectiveDigest: goalDigest(objective),
-        ...(typeof nativeGoal.id === "string" && nativeGoal.id.length > 0 ? { nativeGoalId: nativeGoal.id } : {}),
-        status: changed ? "active" : prior!.status,
-        initialTurnId: changed || !prior ? this.appServer.runtime.observe(threadId, undefined, 1)?.active_turn_id ?? null : prior.initialTurnId,
-        reconnect: changed ? null : prior?.reconnect ?? null, nativeGoalImported: true };
-      await this.goalStore.write(record);
-      return { source: "codex_app_server", operation, goal: this.#goalProjection(record), reconnect_receipt: record.reconnect };
+      const objective = args.objective === null ? null : optionalString(args, "objective", 200_000);
+      const status = args.status === null ? null : enumValue(args, "status", ["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"] as const);
+      const tokenBudget = args.token_budget;
+      if (tokenBudget !== undefined && tokenBudget !== null && (!Number.isSafeInteger(tokenBudget) || (tokenBudget as number) < 0)) throw new Error("token_budget must be a non-negative safe integer or null");
+      const result = responseRecord(await this.appServer.request("thread/goal/set", {
+        threadId, ...(objective !== undefined ? { objective } : {}), ...(status !== undefined ? { status } : {}), ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      }), "thread/goal/set");
+      const nativeGoal = asObject(result.goal, "thread/goal/set goal");
+      if (nativeGoal.threadId !== threadId) throw new Error("Native goal thread identity mismatch");
+      try { await this.goalStore.clear(threadId); } catch { /* Native Goal acknowledgement remains authoritative. */ }
+      return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: null };
     }
     if (operation === "clear") {
-      const prior = await this.goalStore.read(threadId);
-      if (prior?.nativeGoalImported) await this.#clearImportedNativeGoal(threadId);
-      await this.goalStore.clear(threadId);
-      return { source: "codex_app_server", operation, thread_id: threadId, cleared: true };
+      const result = responseRecord(await this.appServer.request("thread/goal/clear", { threadId }), "thread/goal/clear");
+      try { await this.goalStore.clear(threadId); } catch { /* Native Goal acknowledgement remains authoritative. */ }
+      return { source: "codex_app_server", operation, thread_id: threadId, result: sanitizeForTransport(result) };
     }
-    const record = await this.#readGoalRecord(threadId);
+    if (args.objective !== undefined || args.status !== undefined || args.token_budget !== undefined) throw new Error("Goal mutation fields are valid only for set");
+    const read = responseRecord(await this.appServer.request("thread/goal/get", { threadId }), "thread/goal/get");
+    const nativeGoal = read.goal === null || read.goal === undefined ? null : asObject(read.goal, "thread/goal/get goal");
+    if (nativeGoal && nativeGoal.threadId !== threadId) throw new Error("Native goal thread identity mismatch");
     if (operation === "get") {
-      if (record) await this.#syncNativeGoal(record);
-      if (record) await this.#refreshGoalTerminal(record);
-      const lifecycle = await this.#goalLifecycle(threadId, record);
-      const nativeStatus = (lifecycle.native_goal as Record<string, unknown> | null)?.status;
-      return { source: "codex_app_server", operation,
-        goal: record ? { ...this.#goalProjection(record), ...(typeof nativeStatus === "string" ? { status: nativeStatus } : {}) } : null,
-        reconnect_receipt: record?.reconnect ?? null, lifecycle };
+      return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal),
+        reconnect_receipt: nativeGoal ? (await this.#matchingReconnectReceipt(threadId, nativeGoal)) : null };
     }
-    if (!record) throw new Error("No durable goal for exact thread");
+    if (!nativeGoal || typeof nativeGoal.objective !== "string") throw new Error("No native goal for exact thread");
+    if (!["active", "complete"].includes(String(nativeGoal.status))) throw new Error("Native goal status does not permit reconnect");
     const sandbox = enumValue(args, "sandbox", ["read-only", "workspace-write", "danger-full-access"] as const);
     const approvalPolicy = enumValue(args, "approval_policy", ["untrusted", "on-request", "never"] as const);
-    const nativeStatus = await this.#syncNativeGoal(record);
-    if (nativeStatus !== "active" && nativeStatus !== "complete") throw new Error("Native goal status does not permit reconnect");
-    await this.#refreshGoalTerminal(record);
-    if (record.reconnect) return this.#reconnectResponse(record);
+    const digest = goalDigest(nativeGoal.objective);
+    const prior = await this.goalStore.read(threadId);
+    const same = prior?.objectiveDigest === digest && (nativeGoal.id === undefined || prior.nativeGoalId === nativeGoal.id);
+    if (same && prior?.reconnect) return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: prior.reconnect };
+    const record: GoalRecord = { schema: "CodexReconnectBinding", version: 2, threadId,
+      id: goalDigest(JSON.stringify([threadId, digest, nativeGoal.id ?? null])).slice(7), objectiveDigest: digest,
+      ...(typeof nativeGoal.id === "string" ? { nativeGoalId: nativeGoal.id } : {}),
+      reconnect: null };
+    await this.goalStore.write(record);
     const unknown: ReconnectReceipt = { schema: "CodexGoalReconnectReceipt", version: 1,
-      thread_id: threadId, goal_digest: record.objectiveDigest,
-      goal_status: record.status, turn_id: null, status: "unknown" };
+      thread_id: threadId, goal_digest: digest, goal_status: nativeGoal.status === "complete" ? "complete" : "active", turn_id: null, status: "unknown" };
     if (!await this.goalStore.claim(record)) {
-      const existing = await this.goalStore.read(threadId);
-      if (existing?.id !== record.id) throw new Error("Goal changed during reconnect");
-      if (!existing.reconnect) {
-        existing.reconnect = unknown;
-        await this.goalStore.write(existing);
-      }
-      return this.#reconnectResponse(existing);
+      const latest = await this.goalStore.read(threadId);
+      return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: latest?.reconnect ?? unknown };
     }
     record.reconnect = unknown;
     await this.goalStore.write(record);
     try {
       const runtime = this.appServer.runtime.observe(threadId, undefined, 1);
-      if (record.status === "complete" && record.initialTurnId) {
-        record.reconnect = { ...unknown, turn_id: record.initialTurnId, status: "terminal" };
-      } else if (record.status === "complete" && runtime?.active_turn_id) {
-        record.reconnect = { ...unknown, status: "terminal" };
-      } else if (runtime?.active_turn_id) {
-        record.reconnect = { ...unknown, turn_id: runtime.active_turn_id, status: "already_in_progress" };
-      } else {
-        const read = responseRecord(await this.appServer.request("thread/read", { threadId, includeTurns: true }), "thread/read");
-        const thread = asObject(read.thread, "thread/read thread");
-        if (thread.id !== threadId || !Array.isArray(thread.turns)) throw new Error("Exact native thread status is unavailable");
-        const turns = thread.turns as unknown[];
-        const last = turns.length ? asObject(turns.at(-1), "last native turn") : null;
-        const lastId = typeof last?.id === "string" ? last.id : null;
-        record.reconnect = { ...unknown, before_turn_id: lastId };
-        await this.goalStore.write(record);
-        if (record.status === "complete" && lastId && lastId === record.initialTurnId) {
-          record.reconnect = { ...unknown, turn_id: lastId, status: "terminal" };
-        } else if (record.status === "complete") {
-          record.reconnect = { ...unknown, turn_id: record.initialTurnId ?? lastId, status: "terminal" };
-        } else if (last && last.status === "inProgress") {
-          // A persisted inProgress status cannot prove an active turn after runtime loss.
-          record.reconnect = { ...unknown, turn_id: lastId };
-        } else if (last && !["completed", "failed", "interrupted"].includes(String(last.status))) {
-          record.reconnect = { ...unknown, turn_id: lastId };
-        } else {
-          const resumed = await this.appServer.request("thread/resume", { threadId, excludeTurns: true,
-            ...(sandbox ? { sandbox } : {}), ...(approvalPolicy ? { approvalPolicy } : {}),
-            ...(sandbox === "workspace-write" && approvalPolicy === "never" ? { config: BOUNDED_TOOL_CONFIG } : {}) });
-          if (extractThreadId(resumed, "thread/resume") !== threadId) throw new Error("thread/resume returned a different thread id");
-          if (sandbox) extractSandboxPolicy(resumed, "thread/resume", sandbox);
-          if (approvalPolicy) extractApprovalPolicy(resumed, "thread/resume", approvalPolicy);
-          const nativeTurn = (resumed as Record<string, unknown>).turn;
-          const turnId = nativeTurn && typeof nativeTurn === "object" && !Array.isArray(nativeTurn)
-            ? (nativeTurn as Record<string, unknown>).id : undefined;
-          if (typeof turnId === "string" && turnId.length > 0 && turnId !== lastId) {
-            record.reconnect = { ...record.reconnect, turn_id: turnId, status: "started" };
-          }
-        }
+      if (runtime?.active_turn_id) record.reconnect = { ...unknown, turn_id: runtime.active_turn_id, status: "already_in_progress" };
+      else if (nativeGoal.status === "complete") record.reconnect = { ...unknown, status: "terminal" };
+      else {
+        const resumed = await this.appServer.request("thread/resume", { threadId, excludeTurns: true,
+          ...(sandbox ? { sandbox } : {}), ...(approvalPolicy ? { approvalPolicy } : {}) });
+        if (extractThreadId(resumed, "thread/resume") !== threadId) throw new Error("thread/resume returned a different native id");
+        const nativeTurn = (resumed as Record<string, unknown>).turn;
+        const turnId = nativeTurn && typeof nativeTurn === "object" && !Array.isArray(nativeTurn)
+          ? (nativeTurn as Record<string, unknown>).id : undefined;
+        if (typeof turnId === "string") record.reconnect = { ...unknown, turn_id: turnId, status: "started" };
       }
     } catch {
-      // The durable unknown claim prevents an automatic replay after any ambiguous native mutation.
+      // A durable UNKNOWN claim prevents replay after an ambiguous native mutation.
     }
     await this.goalStore.write(record);
-    return this.#reconnectResponse(record);
+    return { source: "codex_app_server", operation, goal: sanitizeForTransport(nativeGoal), reconnect_receipt: record.reconnect };
   }
 
-  #goalProjection(record: GoalRecord): Record<string, unknown> {
-    return { threadId: record.threadId, objective: record.objective, status: record.status,
-      digest: record.objectiveDigest, ...(record.nativeGoalId ? { id: record.nativeGoalId } : {}) };
-  }
-
-  async #syncNativeGoal(record: GoalRecord): Promise<string> {
-    const result = responseRecord(await this.appServer.request("thread/goal/get", { threadId: record.threadId }), "thread/goal/get");
-    const goal = asObject(result.goal, "thread/goal/get goal");
-    if (goal.threadId !== record.threadId) throw new Error("thread/goal/get returned a different thread id");
-    if (goal.objective !== record.objective) throw new Error("Native goal objective differs from durable record");
-    if (typeof goal.status !== "string") throw new Error("Native goal status is unavailable");
-    if (typeof goal.id === "string" && goal.id.length > 0 && goal.id !== record.nativeGoalId) {
-      record.nativeGoalId = goal.id;
-      await this.goalStore.write(record);
-    }
-    if (goal.status === "complete" && record.status !== "complete") {
-      record.status = "complete";
-      await this.goalStore.write(record);
-    }
-    return goal.status;
-  }
-
-  async #goalLifecycle(threadId: string, record: GoalRecord | null): Promise<Record<string, unknown>> {
-    const uncertainty: string[] = [];
-    let nativeGoal: Record<string, unknown> | null = null;
-    try {
-      const result = responseRecord(await this.appServer.request("thread/goal/get", { threadId }), "thread/goal/get");
-      if (result.goal !== null) {
-        nativeGoal = asObject(result.goal, "thread/goal/get goal");
-        if (nativeGoal.threadId !== threadId) throw new Error("thread/goal/get returned a different thread id");
-      }
-    } catch (error) {
-      if (String(error).includes("different thread id")) throw error;
-      uncertainty.push("native_goal_unavailable");
-    }
-    if (record && nativeGoal && (nativeGoal.objective !== record.objective || nativeGoal.status !== record.status)) {
-      uncertainty.push("native_goal_differs_from_durable_record");
-    }
-    const runtime = this.appServer.runtime.observe(threadId, undefined, 1);
-    let latestTurnId: string | null = null;
-    let latestTurnStatus: string | null = null;
-    try {
-      const result = responseRecord(await this.appServer.request("thread/read", { threadId, includeTurns: true }), "thread/read");
-      const thread = asObject(result.thread, "thread/read thread");
-      if (thread.id !== threadId) throw new Error("thread/read returned a different thread id");
-      if (!Array.isArray(thread.turns)) throw new Error("thread/read returned no native turns");
-      const latest = thread.turns.length ? asObject(thread.turns.at(-1), "latest native turn") : null;
-      if (latest && (typeof latest.id !== "string" || latest.id.length === 0)) throw new Error("latest native turn has no id");
-      latestTurnId = latest ? latest.id as string : null;
-      latestTurnStatus = latest && typeof latest.status === "string" ? latest.status : null;
-    } catch (error) {
-      if (String(error).includes("different thread id")) throw error;
-      uncertainty.push("native_turn_history_unavailable");
-    }
-    const activeTurnId = runtime?.active_turn_id ?? null;
-    if (!activeTurnId && latestTurnStatus === "inProgress") uncertainty.push("persisted_in_progress_is_not_live_proof");
-    const receipt = record?.reconnect ?? null;
-    let outcome = receipt?.status ?? "none";
-    if (receipt?.status === "unknown") {
-      // History identifies candidates, but cannot attribute a turn to a lost mutation acknowledgement.
-      uncertainty.push("reconnect_outcome_not_proven");
-      outcome = "unknown";
-    }
-    return { thread_id: threadId, native_goal: nativeGoal, goal_digest: nativeGoal && typeof nativeGoal.objective === "string"
-      ? goalDigest(nativeGoal.objective) : record?.objectiveDigest ?? null,
-      active_turn_id: activeTurnId, latest_turn_id: latestTurnId, latest_turn_status: latestTurnStatus,
-      reconnect_outcome: outcome, reconnect_receipt: receipt,
-      candidate_turn_id: receipt?.status === "unknown" && latestTurnId !== receipt.before_turn_id ? latestTurnId : null,
-      uncertainty };
-  }
-
-  async #readGoalRecord(threadId: string): Promise<GoalRecord | null> {
-    const stored = await this.goalStore.read(threadId);
-    if (stored) return stored;
-    if (await this.goalStore.isCleared(threadId)) return null;
-    // Deployed LCB wrote native goals before this bridge-owned record existed.
-    // Import only a proven exact-thread native goal; unsupported native methods leave no record.
-    let native: unknown;
-    try { native = await this.appServer.request("thread/goal/get", { threadId }); }
+  async #matchingReconnectReceipt(threadId: string, nativeGoal: Record<string, unknown>): Promise<ReconnectReceipt | null> {
+    let record: GoalRecord | null;
+    try { record = await this.goalStore.read(threadId); }
     catch { return null; }
-    const result = responseRecord(native, "thread/goal/get");
-    if (result.goal === null) return null;
-    const goal = asObject(result.goal, "thread/goal/get goal");
-    if (goal.threadId !== threadId) throw new Error("thread/goal/get returned a different thread id");
-    if (typeof goal.objective !== "string" || goal.objective.trim().length === 0 || goal.objective.length > 200_000
-      || (goal.status !== "active" && goal.status !== "complete")) throw new Error("Native goal cannot be bound to compatibility record");
-    const record: GoalRecord = { schema: "CodexBridgeGoal", version: 1, threadId,
-      id: randomUUID(), objective: goal.objective, objectiveDigest: goalDigest(goal.objective),
-      ...(typeof goal.id === "string" && goal.id.length > 0 ? { nativeGoalId: goal.id } : {}),
-      status: goal.status, initialTurnId: null, reconnect: null, nativeGoalImported: true };
-    await this.goalStore.write(record);
-    return record;
-  }
-
-  async #clearImportedNativeGoal(threadId: string): Promise<void> {
-    const cleared = responseRecord(await this.appServer.request("thread/goal/clear", { threadId }), "thread/goal/clear");
-    if (cleared.cleared !== true) throw new Error("Imported native goal clear was not confirmed");
-  }
-
-  async #refreshGoalTerminal(record: GoalRecord): Promise<void> {
-    const boundTurnId = record.reconnect?.turn_id ?? record.initialTurnId;
-    if (!boundTurnId || record.status !== "active") return;
-    try {
-      const read = responseRecord(await this.appServer.request("thread/read", { threadId: record.threadId, includeTurns: true }), "thread/read");
-      const thread = asObject(read.thread, "thread/read thread");
-      if (thread.id !== record.threadId || !Array.isArray(thread.turns)) return;
-      const exact = thread.turns.find((item: unknown) => item !== null && typeof item === "object"
-        && !Array.isArray(item) && (item as Record<string, unknown>).id === boundTurnId);
-      if (exact && asObject(exact, "bound native turn").status === "completed") {
-        record.status = "complete";
-        await this.goalStore.write(record);
-      }
-    } catch { /* An unavailable native read cannot prove completion. */ }
-  }
-
-  #reconnectResponse(record: GoalRecord): Record<string, unknown> {
-    return { source: "codex_app_server", operation: "reconnect", thread_id: record.threadId,
-      resumed: record.reconnect?.status === "started" || record.reconnect?.status === "already_in_progress",
-      receipt: record.reconnect };
+    return record && record.objectiveDigest === goalDigest(String(nativeGoal.objective)) &&
+      (nativeGoal.id === undefined || record.nativeGoalId === nativeGoal.id) ? record.reconnect : null;
   }
 
   async #observe(args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
@@ -1669,15 +1623,18 @@ export class ControlSurface {
   }
 
   async #steer(args: Record<string, unknown>): Promise<unknown> {
-    onlyKeys(args, ["thread_id", "expected_turn_id", "text"]);
+    onlyKeys(args, ["thread_id", "expected_turn_id", "text", "input", "client_user_message_id"]);
     const threadId = requiredString(args, "thread_id", 200);
     const expectedTurnId = requiredString(args, "expected_turn_id", 200);
-    const text = requiredString(args, "text");
+    if ((args.text === undefined) === (args.input === undefined)) throw new Error("Provide exactly one of text or input");
+    const input = args.input === undefined ? [{ type: "text", text: requiredString(args, "text"), text_elements: [] }] : nativeTurnInput(args.input);
+    const clientUserMessageId = optionalString(args, "client_user_message_id", 200);
     const result = responseRecord(
       await this.appServer.request("turn/steer", {
         threadId,
         expectedTurnId,
-        input: [{ type: "text", text, text_elements: [] }],
+        input,
+        ...(clientUserMessageId ? { clientUserMessageId } : {}),
       }),
       "turn/steer",
     );
@@ -1806,6 +1763,27 @@ export class ControlSurface {
       }
     } else if (method === "item/tool/requestUserInput") {
       response = answers !== undefined ? { answers: asObject(answers, "answers") } : asObject(generic, "response");
+    } else if (method === "item/tool/call") {
+      if (decision !== undefined || amendment !== undefined || answers !== undefined || generic === undefined) throw new Error("Dynamic tool call requires response only");
+      const value = boundedObject(generic, "response", 200_000);
+      onlyKeys(value, ["contentItems", "success"]);
+      if (typeof value.success !== "boolean" || !Array.isArray(value.contentItems) || value.contentItems.length > 100) throw new Error("Dynamic tool response requires bounded contentItems and success");
+      for (const raw of value.contentItems) {
+        const item = boundedObject(raw, "content item", 100_000);
+        const type = enumValue(item, "type", ["inputText", "inputImage", "inputAudio"] as const);
+        if (!type) throw new Error("Dynamic tool content type is required");
+        const field = type === "inputText" ? "text" : type === "inputImage" ? "imageUrl" : "audioUrl";
+        onlyKeys(item, ["type", field]);
+        requiredString(item, field, 100_000);
+      }
+      response = value;
+    } else if (method === "mcpServer/elicitation/request") {
+      if (decision !== undefined || amendment !== undefined || answers !== undefined || generic === undefined) throw new Error("MCP elicitation requires response only");
+      const value = boundedObject(generic, "response", 100_000);
+      onlyKeys(value, ["action", "content"]);
+      const action = enumValue(value, "action", ["accept", "decline", "cancel"] as const);
+      if (!action || (action !== "accept" && value.content !== undefined && value.content !== null)) throw new Error("Invalid MCP elicitation action/content");
+      response = value;
     } else {
       if (generic === undefined) {
         throw new Error("This request method requires a generic response object");
@@ -1829,7 +1807,7 @@ export class ControlSurface {
       await this.appServer.respond(requestId, response);
     } catch (error) {
       this.appServer.runtime.releasePending(pending);
-      throw error;
+      throw new Error(`App-server response write for ${method} has UNKNOWN outcome; the pending request remains observable and must be reconciled before any retry: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.appServer.runtime.completePending(pending);
     return {

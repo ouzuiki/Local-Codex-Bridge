@@ -184,10 +184,17 @@ test("MCP stdio initializes idempotently and lists the native and compatibility 
     assert.deepEqual(ping.result, {});
     const tools = (listed.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
     assert.deepEqual(tools.map((tool) => tool.name), [
+      "codex_native_read",
+      "codex_native_action",
+      "codex_experimental_read",
+      "codex_experimental_action",
       "codex_threads",
       "codex_goal",
       "codex_models",
       "codex_rate_limits",
+      "codex_thread_lifecycle",
+      "codex_thread_start",
+      "codex_turn_start",
       "codex_turn",
       "codex_observe",
       "codex_steer",

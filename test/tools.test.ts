@@ -599,108 +599,30 @@ test("model plus effort validates advertised support and passes exact tokens", a
   assert.equal(object(manager.requests[2]?.params).effort, "high");
 });
 
-test("model plus effort rejects unsupported advertised effort but tolerates absent support data", async (t) => {
-  await t.test("advertised unsupported", async () => {
-    const manager = new StubAppServerManager((method) => {
-      assert.equal(method, "model/list");
-      return {
-        data: [{
-          id: "bounded-model",
-          supportedReasoningEfforts: [{ reasoningEffort: "medium" }],
-        }],
-        nextCursor: null,
-      };
-    });
-    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
-    await assert.rejects(
-      surface.call("codex_turn", {
-        text: "unsupported effort",
-        thread_id: "thread-bounded",
-        model: "bounded-model",
-        effort: "high",
-      }),
-      /Unsupported effort "high" for model "bounded-model".*medium/,
-    );
-    assert.deepEqual(manager.requests.map((request) => request.method), ["model/list"]);
+test("model and effort tokens defer compatibility to current native app-server", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "model/list") return { data: [{ id: "bounded-model", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }], nextCursor: null };
+    if (method === "thread/resume") return { thread: { id: "thread-bounded" } };
+    if (method === "turn/start") return { turn: { id: "turn-bounded", status: "inProgress" } };
+    throw new Error(`unexpected request ${method}`);
   });
-
-  await t.test("support field absent", async () => {
-    const manager = new StubAppServerManager((method) => {
-      if (method === "model/list") {
-        return { data: [{ id: "native-authoritative" }], nextCursor: null };
-      }
-      if (method === "thread/resume") {
-        return { thread: { id: "thread-native" } };
-      }
-      if (method === "turn/start") {
-        return { turn: { id: "turn-native", status: "inProgress" } };
-      }
-      throw new Error(`unexpected request ${method}`);
-    });
-    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
-    await surface.call("codex_turn", {
-      text: "native decides",
-      thread_id: "thread-native",
-      model: "native-authoritative",
-      effort: "future-effort",
-    });
-    assert.equal(object(manager.requests[2]?.params).effort, "future-effort");
-  });
+  const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
+  await surface.call("codex_turn", { text: "new effort", thread_id: "thread-bounded", model: "bounded-model", effort: "high" });
+  assert.deepEqual(manager.requests.map((request) => request.method), ["model/list", "thread/resume", "turn/start"]);
+  assert.equal(object(manager.requests[2]?.params).effort, "high");
 });
 
-test("effort-only validation uses the catalog-wide advertised union without inferring a model", async (t) => {
-  await t.test("advertised somewhere passes through", async () => {
-    const manager = new StubAppServerManager((method) => {
-      if (method === "model/list") {
-        return {
-          data: [
-            { id: "model-a", supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
-            { id: "model-b", supportedReasoningEfforts: [{ reasoningEffort: "xhigh" }] },
-          ],
-          nextCursor: null,
-        };
-      }
-      if (method === "thread/resume") {
-        return { thread: { id: "thread-effort" } };
-      }
-      if (method === "turn/start") {
-        return { turn: { id: "turn-effort", status: "inProgress" } };
-      }
-      throw new Error(`unexpected request ${method}`);
-    });
-    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
-    await surface.call("codex_turn", {
-      text: "effort only",
-      thread_id: "thread-effort",
-      effort: "xhigh",
-    });
-    assert.equal("model" in object(manager.requests[1]?.params), false);
-    assert.equal("model" in object(manager.requests[2]?.params), false);
-    assert.equal(object(manager.requests[2]?.params).effort, "xhigh");
+test("effort-only token forwards without a model catalog read", async () => {
+  const manager = new StubAppServerManager((method) => {
+    if (method === "thread/resume") return { thread: { id: "thread-effort" } };
+    if (method === "turn/start") return { turn: { id: "turn-effort", status: "inProgress" } };
+    throw new Error(`unexpected request ${method}`);
   });
-
-  await t.test("absent everywhere rejects before mutation", async () => {
-    const manager = new StubAppServerManager((method) => {
-      assert.equal(method, "model/list");
-      return {
-        data: [{ id: "model-only", supportedReasoningEfforts: [
-          { reasoningEffort: "low" },
-          { reasoningEffort: "medium" },
-        ] }],
-        nextCursor: null,
-      };
-    });
-    const surface = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
-    await assert.rejects(
-      surface.call("codex_turn", {
-        text: "unknown effort",
-        thread_id: "thread-effort",
-        effort: "impossible",
-      }),
-      /absent from all advertised supportedReasoningEfforts.*does not infer the current thread model.*low, medium/,
-    );
-    assert.deepEqual(manager.requests.map((request) => request.method), ["model/list"]);
+  await new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY).call("codex_turn", {
+    text: "effort only", thread_id: "thread-effort", effort: "xhigh",
   });
+  assert.deepEqual(manager.requests.map((request) => request.method), ["thread/resume", "turn/start"]);
+  assert.equal(object(manager.requests[1]?.params).effort, "xhigh");
 });
 
 test("model catalog pagination cycles fail locally before thread mutation", async () => {

@@ -20,17 +20,13 @@ export interface ReconnectReceipt {
 }
 
 export interface GoalRecord {
-  schema: "CodexBridgeGoal";
-  version: 1;
+  schema: "CodexReconnectBinding";
+  version: 2;
   threadId: string;
   id: string;
-  objective: string;
   objectiveDigest: string;
   nativeGoalId?: string;
-  status: GoalStatus;
-  initialTurnId: string | null;
   reconnect: ReconnectReceipt | null;
-  nativeGoalImported?: boolean;
 }
 
 interface ClearedGoal { schema: "CodexBridgeGoalCleared"; version: 1; threadId: string }
@@ -54,30 +50,28 @@ export class GoalStore {
   }
 
   async read(threadId: string): Promise<GoalRecord | null> {
-    let value: GoalRecord | ClearedGoal;
-    try { value = JSON.parse(await readFile(this.path(threadId), "utf8")) as GoalRecord | ClearedGoal; }
+    let value: Record<string, unknown>;
+    try { value = JSON.parse(await readFile(this.path(threadId), "utf8")) as Record<string, unknown>; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
     if (value.schema === "CodexBridgeGoalCleared" && value.version === 1 && value.threadId === threadId) return null;
-    if (value.schema !== "CodexBridgeGoal" || value.version !== 1 || value.threadId !== threadId
-      || typeof value.objective !== "string" || value.objectiveDigest !== goalDigest(value.objective)
-      || value.nativeGoalId !== undefined && typeof value.nativeGoalId !== "string"
-      || typeof value.id !== "string" || !["active", "complete"].includes(value.status)
-      || value.initialTurnId !== null && typeof value.initialTurnId !== "string"
-      || value.nativeGoalImported !== undefined && typeof value.nativeGoalImported !== "boolean"
-      || value.reconnect !== null && (value.reconnect.schema !== "CodexGoalReconnectReceipt" || value.reconnect.version !== 1
-        || value.reconnect.thread_id !== threadId
-        || value.reconnect.goal_id !== undefined && value.reconnect.goal_id !== value.id
-        || value.reconnect.goal_digest !== value.objectiveDigest
-        || !["started", "already_in_progress", "terminal", "unknown"].includes(value.reconnect.status)
-        || value.reconnect.turn_id !== null && typeof value.reconnect.turn_id !== "string"
-        || value.reconnect.before_turn_id !== undefined && value.reconnect.before_turn_id !== null
-          && typeof value.reconnect.before_turn_id !== "string")) {
+    if (!((value.schema === "CodexReconnectBinding" && value.version === 2) ||
+      (value.schema === "CodexBridgeGoal" && value.version === 1)) || value.threadId !== threadId
+      || typeof value.id !== "string" || !/^[0-9a-f-]{8,100}$/.test(value.id)
+      || typeof value.objectiveDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.objectiveDigest)
+      || value.nativeGoalId !== undefined && typeof value.nativeGoalId !== "string") {
       throw new Error("Stored goal binding is invalid");
     }
-    return value as GoalRecord;
+    const reconnect = value.reconnect as ReconnectReceipt | null;
+    if (reconnect === undefined || reconnect !== null && (typeof reconnect !== "object" || reconnect.schema !== "CodexGoalReconnectReceipt" || reconnect.version !== 1
+      || reconnect.thread_id !== threadId || reconnect.goal_digest !== value.objectiveDigest
+      || !["started", "already_in_progress", "terminal", "unknown"].includes(reconnect.status)
+      || reconnect.turn_id !== null && typeof reconnect.turn_id !== "string")) throw new Error("Stored reconnect receipt is invalid");
+    return { schema: "CodexReconnectBinding", version: 2, threadId,
+      id: value.id as string, objectiveDigest: value.objectiveDigest as string,
+      ...(typeof value.nativeGoalId === "string" ? { nativeGoalId: value.nativeGoalId } : {}), reconnect };
   }
 
   async isCleared(threadId: string): Promise<boolean> {

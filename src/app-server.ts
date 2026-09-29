@@ -23,11 +23,15 @@ const THREADLESS_REQUEST_ERROR = {
   message: "Unsupported app-server request without thread context",
 } as const;
 const MUTATING_REQUEST_METHODS = new Set([
-  "thread/start",
-  "thread/resume",
-  "turn/start",
-  "turn/steer",
-  "turn/interrupt",
+  "thread/start", "thread/resume", "thread/fork", "thread/archive", "thread/unarchive",
+  "thread/name/set", "thread/metadata/update", "thread/compact/start", "thread/revert",
+  "thread/delete", "thread/unsubscribe", "thread/inject_items", "thread/attachment/add",
+  "thread/attachment/remove", "threadSection/create", "threadSection/update", "threadSection/delete",
+  "thread/section/move", "review/start", "skills/extraRoots/set", "skills/config/write",
+  "experimentalFeature/enablement/set", "thread/queue/add", "thread/queue/update",
+  "thread/queue/delete", "thread/queue/reorder", "thread/queue/start",
+  "thread/settings/update", "turn/settings/update", "thread/memoryMode/set",
+  "thread/goal/set", "thread/goal/clear", "turn/start", "turn/steer", "turn/interrupt",
 ]);
 
 interface PendingCall {
@@ -528,9 +532,9 @@ export class AppServerManager {
         }
         clearTimeout(pending.timer);
         this.#pendingCalls.delete(key);
-        pending.reject(
-          new Error(`Failed to write app-server request ${method}: ${messageFromUnknown(error)}`),
-        );
+        pending.reject(new Error(MUTATING_REQUEST_METHODS.has(method)
+          ? `App-server write failed for mutating request ${method}; operation outcome is UNKNOWN because bytes may have reached Codex. No automatic retry is performed: ${messageFromUnknown(error)}`
+          : `Failed to write app-server request ${method}: ${messageFromUnknown(error)}`));
       });
     });
   }

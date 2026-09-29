@@ -348,13 +348,15 @@ function normalizeEventType(method: string): string {
   return `codex.${normalized || "native_event"}`;
 }
 
-function pendingKind(method: string): "action_approval" | "permission_grant" | "user_input" | "unknown" {
+function pendingKind(method: string): "action_approval" | "permission_grant" | "user_input" | "dynamic_tool" | "mcp_elicitation" | "unknown" {
   if (method === "item/commandExecution/requestApproval" ||
       method === "item/fileChange/requestApproval" ||
       method === "execCommandApproval" ||
       method === "applyPatchApproval") return "action_approval";
   if (method === "item/permissions/requestApproval") return "permission_grant";
   if (method === "item/tool/requestUserInput") return "user_input";
+  if (method === "item/tool/call") return "dynamic_tool";
+  if (method === "mcpServer/elicitation/request") return "mcp_elicitation";
   return "unknown";
 }
 
@@ -373,6 +375,8 @@ function pendingResponseContract(method: string): unknown {
   if (kind === "user_input") {
     return { type: "user_input", accepts: ["answers", "response"] };
   }
+  if (kind === "dynamic_tool") return { type: "dynamic_tool", required: ["contentItems", "success"] };
+  if (kind === "mcp_elicitation") return { type: "mcp_elicitation", actions: ["accept", "decline", "cancel"] };
   return null;
 }
 
@@ -820,7 +824,7 @@ export class RuntimeStore {
       turnId,
     );
     this.#publishUx({
-      kind: method === "item/tool/requestUserInput" || method.toLowerCase().includes("elicitation")
+      kind: method === "item/tool/requestUserInput" || method === "item/tool/call" || method.toLowerCase().includes("elicitation")
         ? "waiting_user_input"
         : "waiting_approval",
       thread_id: threadId,

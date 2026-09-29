@@ -351,7 +351,8 @@ test("mutating app-server acknowledgement timeouts report unknown outcome withou
     requestTimeoutMs: 20,
   });
   try {
-    for (const method of ["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]) {
+    for (const method of ["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt",
+      "thread/fork", "thread/attachment/add", "thread/goal/set", "thread/queue/add"]) {
       await assert.rejects(
         manager.request(method, {}),
         (error: unknown) => {
@@ -368,7 +369,7 @@ test("mutating app-server acknowledgement timeouts report unknown outcome withou
     );
     const count = await manager.request("test/count", {}) as Record<string, unknown>;
     // App-server startup sends initialize plus the initialized notification.
-    assert.equal(count.requestCount, 9);
+    assert.equal(count.requestCount, 13);
   } finally {
     await manager.close();
   }
@@ -638,7 +639,7 @@ test("duplicate app-server request ids fail the protocol without an ambiguous re
   }
 });
 
-test("unsupported elicitation requests remain observable and are never answered", async () => {
+test("malformed elicitation responses remain observable and are never answered", async () => {
   const manager = new RejectingResponseManager();
   const control = new ControlSurface(manager, undefined, WINDOWS_PLATFORM_POLICY);
   manager.runtime.markTurnAccepted("thread-unknown", "turn-unknown");
@@ -657,7 +658,7 @@ test("unsupported elicitation requests remain observable and are never answered"
         method: "mcpServer/elicitation/request",
         response: { guessed: true },
       }),
-      /Unsupported app-server request method: mcpServer\/elicitation\/request; pending request remains observable/,
+      /Unknown argument field: guessed/,
     );
     assert.equal(manager.lastResponseId, undefined);
     const observed = manager.runtime.observe("thread-unknown", 0, 10);
@@ -673,13 +674,12 @@ test("unsupported elicitation requests remain observable and are never answered"
   }
 });
 
-test("codex_respond metadata does not advertise generic future-method responses", () => {
+test("codex_respond metadata advertises current bounded request contracts", () => {
   const respondTool = TOOL_DEFINITIONS.find((tool) => tool.name === "codex_respond");
-  assert.match(respondTool?.description ?? "", /Unsupported or unknown methods fail locally and remain pending/);
-  assert.match(respondTool?.description ?? "", /item\/permissions\/requestApproval/);
-  assert.doesNotMatch(respondTool?.description ?? "", /elicitation/i);
+  assert.match(respondTool?.description ?? "", /Unknown methods remain pending/);
+  assert.match(respondTool?.description ?? "", /MCP elicitations/);
   const response = (respondTool?.inputSchema.properties as Record<string, unknown>).response as Record<string, unknown>;
-  assert.match(response.description as string, /unsupported or future methods remain pending/);
+  assert.match(response.description as string, /dynamic tool call/);
 });
 
 test("serialized app-server writes preserve order and wait for drain", async () => {

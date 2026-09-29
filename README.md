@@ -1,6 +1,6 @@
 # Local Codex Bridge
 
-*A thin supervisory MCP bridge between external AI supervisors and native Codex.*
+*A broad native Codex capability surface with bounded MCP transport and Host-owned authority.*
 
 Local Codex Bridge 是一个面向 Windows、macOS 与 Linux 的轻量 MCP stdio 适配器：
 
@@ -18,7 +18,7 @@ ChatGPT / external AI supervisor
 
 **监督者负责目标、资源、边界、风险、审批与验收；Codex 保留原生的编码与执行自主性。**
 
-Bridge 本身保持薄层：
+Bridge 的能力面有意覆盖更多原生 app-server 操作；它的状态与传输层仍保持精简：
 
 - 不创建第二套 job / task 系统；
 - 不复制 Codex 对话历史；
@@ -81,18 +81,26 @@ Windows、macOS 与 Linux 共用同一核心 Bridge，实现差异只保留在�
 
 ------
 
-## 11 个 MCP 工具
+## MCP 工具
+
+当前 Candidate 暴露 18 个工具，包括原有具名兼容工具、原生线程/turn 入口，以及四个有界通用 native 分组。通用分组以 [src/native.ts](src/native.ts) 中的逐项方法和参数 allowlist 为准；完整 0.156 方法分类见 [audit/methods-0.156.json](audit/methods-0.156.json)。
+
+| 分组 | 工具 |
+| --- | --- |
+| Stable native | `codex_native_read`, `codex_native_action` |
+| Experimental native | `codex_experimental_read`, `codex_experimental_action` |
+| 线程/turn 入口 | `codex_thread_start`, `codex_turn_start`, `codex_thread_lifecycle` |
 
 | Tool               | 用途                                                         | 边界                                                         |
 | ------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | `codex_threads`    | 列出、搜索、读取原生 Codex 持久线程                          | `cwd` / search 只是筛选条件，不是 ACL                        |
-| `codex_goal`       | 为现有 Host 保存绑定原生 thread 的最小 goal，并返回持久 reconnect receipt | 不恢复旧 checkpoint；不盲目重试未知结果 |
+| `codex_goal`       | 原生 Goal set/get/clear；为精确 native resume 保存 reconnect receipt | 原生 Goal 是真值；不恢复旧 checkpoint；不盲目重试未知结果 |
 | `codex_models`     | 按需读取一页原生 `model/list`                                | 不缓存模型目录，不维护 current-model registry                |
 | `codex_rate_limits` | 直接读取原生 `account/rateLimits/read` 额度状态               | 不启动 thread/turn、不调用模型；结果有界、净化且删除 reset-credit opaque ID |
 | `codex_turn`       | 创建或恢复原生 thread，并启动一个 turn                       | 返回 accepted 不等于任务完成；model / effort 都是可选 override |
 | `codex_observe`    | 有界读取实时事件、持久历史、pending requests、terminal state 与 cursor | 支持一次 bounded wait；安静不等于卡死                        |
 | `codex_steer`      | 对同一个 active turn 追加语义纠正或新意图                    | 不是 timer、polling 或 retry 机制                            |
-| `codex_respond`    | 回答真实存在且 Bridge 明确支持的 approval / user-input / permission request | 必须保留原始 request id 和准确 scope；不支持 elicitation     |
+| `codex_respond`    | 回答真实存在的 approval / user-input / permission / dynamic-tool / MCP elicitation request | 必须保留原始 request id 和准确 scope |
 | `codex_interrupt`  | 中断准确的 active thread / turn                              | 只发送原生 interrupt，不重启 Bridge 或 app-server            |
 | `memory_search`    | 从 TencentDB MemoryCore 检索 advisory L1 memory              | 结果是 advisory，不是权威 project truth；须自行核实 Git/DB/docs |
 | `memory_record_turn` | 记录原始 L0 对话/已验证执行上下文，供异步 memory 抽取         | 不直接创建 L1 memory，也不构成权威 project truth             |
@@ -142,9 +150,7 @@ Bridge 会临时读取一份新的、包含 hidden models 的原生 `model/list`
 
 如果同时指定模型和 reasoning effort：
 
-Bridge 只在原生 catalog **明确证明不兼容**时本地拒绝。
-
-如果 upstream 没有提供足够的 compatibility metadata，Bridge 不自行猜测，而把最终决定留给 native Codex。
+Bridge 验证 model 标识存在，并把 effort 原样交给 native Codex 判断兼容性。
 
 ### effort-only
 
@@ -152,7 +158,7 @@ Bridge 只在原生 catalog **明确证明不兼容**时本地拒绝。
 
 Bridge 不尝试推断当前 thread 正在使用哪个模型。
 
-它只会拒绝一个在当前 catalog 所有已公布 reasoning-effort token 中都不存在的值；这个 effort 对当前真实模型是否可用，仍由 app-server 决定。
+Bridge 不为 effort-only 请求读取 catalog；这个 effort 对当前真实模型是否可用，由 app-server 决定。
 
 `thread/read` 也不会被 Bridge 当作 current-model registry 的来源。
 
@@ -192,13 +198,7 @@ terminal state / acceptance
 
 ## UNKNOWN：不要直接重试 mutating request
 
-以下原生请求如果已经成功写入 app-server，但等待 acknowledgement 超时：
-
-- `thread/start`
-- `thread/resume`
-- `turn/start`
-- `turn/steer`
-- `turn/interrupt`
+任何公开的 mutating native 方法已发送后，如果 acknowledgement 超时或写入结果不明确：
 
 Bridge 会把结果视为：
 
@@ -220,18 +220,9 @@ Bridge 不自动替 supervisor 做这种 retry。
 
 ------
 
-## Elicitation 目前不受支持
+## Native ServerRequest
 
-`mcpServer/elicitation/request` 当前没有进入 Bridge 的 supported response surface。
-
-如果 native Codex 发出这类 request：
-
-- Bridge 会保留并暴露它；
-- 不会静默吞掉；
-- 不会猜测 response schema；
-- 不会通过 `codex_respond` 随便构造答案。
-
-只有未来存在明确、稳定并经过验证的上游 contract 时，才值得考虑支持。
+`codex_respond` 支持当前 0.156 的 approval、UserInput、`item/tool/call` 与 `mcpServer/elicitation/request`，并核对原始 request ID、thread、method 和 turn scope。未知未来请求保持 pending，且不会猜测 response contract。认证 token refresh 与 attestation 属于运行时内部协议。
 
 ------
 
@@ -492,8 +483,9 @@ npm run smoke:live
 
 - `src/mcp.ts` — MCP stdio / JSON-RPC boundary
 - `src/app-server.ts` — native Codex app-server process / protocol adapter
-- `src/tools.ts` — 11 tools、schema 与 supervisory semantics
-- `src/goal-store.ts` — durable per-thread goal and reconnect receipt
+- `src/tools.ts` — 具名工具、native UserInput、Goal 与 ServerRequest 合约
+- `src/native.ts` — stable / experimental 原生 allowlists 和有界参数验证
+- `src/goal-store.ts` — reconnect 绑定与不确定性收据；原生 Goal 始终是真值
 - `src/runtime.ts` — bounded live runtime state / events / pending requests
 - `src/platform.ts` — Windows / macOS / Linux platform boundary
 - `src/version.ts` — canonical Bridge version
