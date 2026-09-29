@@ -70,6 +70,9 @@ test("runtime derives exact live semantic progress and redacts reasoning text", 
   const runtime = new RuntimeStore();
   runtime.ensureThread("thread-semantic");
   assert.deepEqual(runtime.observe("thread-semantic", 0, 100)?.semantic_progress, {
+    classification: "derived_diagnostic",
+    authoritative: false,
+    control_relevant: false,
     semantic_state: "productive",
     last_productive_at: null,
     last_productive_cursor: null,
@@ -114,6 +117,9 @@ test("runtime derives exact live semantic progress and redacts reasoning text", 
   observed = runtime.observe("thread-semantic", 0, 100)!;
   const productiveEvent = observed.events.at(-1)!;
   assert.deepEqual(observed.semantic_progress, {
+    classification: "derived_diagnostic",
+    authoritative: false,
+    control_relevant: false,
     semantic_state: "productive",
     last_productive_at: productiveEvent.at,
     last_productive_cursor: productiveEvent.cursor,

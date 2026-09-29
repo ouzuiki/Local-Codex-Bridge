@@ -120,6 +120,9 @@ interface ThreadRuntime {
 }
 
 export interface SemanticProgress {
+  classification: "derived_diagnostic";
+  authoritative: false;
+  control_relevant: false;
   semantic_state: "productive" | "blocked" | "reasoning_only";
   last_productive_at: string | null;
   last_productive_cursor: number | null;
@@ -966,6 +969,9 @@ export class RuntimeStore {
       pending_requests: pendingRequests,
       terminal: runtime.terminal,
       semantic_progress: {
+        classification: "derived_diagnostic",
+        authoritative: false,
+        control_relevant: false,
         semantic_state: pendingRequests.length > 0 ? "blocked" : runtime.semanticState,
         last_productive_at: runtime.lastProductiveAt,
         last_productive_cursor: runtime.lastProductiveCursor,
