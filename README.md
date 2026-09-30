@@ -30,7 +30,9 @@ Bridge 的能力面有意覆盖更多原生 app-server 操作；它的状态与�
 
 ## 当前测试候选版本
 
-**V2.1.3** · [CHANGELOG](CHANGELOG.md)
+**V2.1.4** · [CHANGELOG](CHANGELOG.md)
+
+V2.1.4 是补丁版本：MemoryCore 自动写回不再把截断、仅流式或脱敏的 final 当作完整最终答案写入，并同步 18 工具文档表述。
 
 V2.1.3 继续收紧 Bridge 作为 supervisory adapter 的边界，并补充：
 

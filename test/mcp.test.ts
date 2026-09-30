@@ -144,7 +144,7 @@ test("MCP stdio initializes idempotently and lists the native and compatibility 
       {
         name: "local-codex-bridge",
         title: "Local Codex Bridge",
-        version: "2.1.3",
+        version: "2.1.4",
       },
     );
 

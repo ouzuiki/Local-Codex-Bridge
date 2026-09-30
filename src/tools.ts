@@ -1074,7 +1074,15 @@ export class ControlSurface {
     const pending = this.pendingMemoryWritebacks.get(key);
     if (!pending || pending.threadId !== notification.threadId) return;
     this.pendingMemoryWritebacks.delete(key);
-    if (notification.terminal.status !== "completed" || !notification.terminal.final_result) {
+    // Only a complete, unredacted final is written back; truncated,
+    // streamed-only, or masked text is not the native final answer.
+    const meta = notification.terminal.final_result_meta;
+    if (
+      notification.terminal.status !== "completed" ||
+      !notification.terminal.final_result ||
+      meta?.complete !== true ||
+      meta.redacted
+    ) {
       void pending.handle.skip();
       this.appServer.runtime.setMemoryWritebackStatus(notification.threadId, key, "skipped");
       return;

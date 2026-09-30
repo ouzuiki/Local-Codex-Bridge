@@ -20,11 +20,16 @@ MCP client -> Local Codex Bridge (JSON-RPC stdio)
 
 `src/mcp.ts` owns the MCP boundary, `src/app-server.ts` owns the official child-process protocol, `src/tools.ts` owns the public tool contract, and `src/runtime.ts` owns ephemeral live state. The Windows Tray and Secure MCP Tunnel integration are optional layers; the Tunnel itself is external to this repository.
 
-The eleven public tools have distinct semantics:
+The eighteen public tools (the Thick LCB surface) have distinct semantics:
 
+- `codex_native_read`, `codex_native_action`, `codex_experimental_read`, `codex_experimental_action`: the four generic native method groups; fixed stable/experimental allowlists using exact native method names and parameters, with bounded results reporting `delivery.lossless` (reads also accept all-or-nothing `delivery: "exact"`). Generic command, file system, process, account, plugin installation, and config mutation methods are excluded.
 - `codex_threads`: list/search/read persistent native threads; filters are not access control.
 - `codex_goal`: preserve deployed Host goal calls through a minimal durable per-thread goal record and exact reconnect receipt; this is not a checkpoint owner.
 - `codex_models`: read one bounded current `model/list` page on demand; it creates no catalog cache or current-model registry.
+- `codex_rate_limits`: read current native quota state on demand; it is read-only, starts no thread or turn, and invokes no model.
+- `codex_thread_lifecycle`: fork or compact an exact native thread, returning the native acknowledgement and identity.
+- `codex_thread_start`: start one persistent native thread without a turn.
+- `codex_turn_start`: start one turn on an exact existing idle native thread without resuming or creating a thread.
 - `codex_turn`: create or resume a native thread and start a turn; acceptance is not completion.
 - `codex_observe`: read bounded live state or explicitly degraded persisted history after Bridge state loss.
 - `codex_steer`: exceptional semantic correction to the exact active turn; do not use it for routine progress supervision, as a timer, or as a retry.
@@ -62,7 +67,7 @@ Prefer evidence from the current source, tests, package metadata, and actual mac
 A rebuild or install should demonstrate, as applicable:
 
 - dependency installation, type checking, build, and the regular automated test suite succeed;
-- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the ten intended tools;
+- the MCP server keeps stdout clean, initializes correctly, and exposes exactly the eighteen intended tools;
 - the official app-server executable is resolved and launched with the expected stdio arguments;
 - persistent native history and ephemeral Bridge state remain clearly separated;
 - no author-specific path, credential, Tunnel profile, port, or secret has entered the repository or generic setup;

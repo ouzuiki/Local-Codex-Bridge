@@ -1,6 +1,12 @@
 # 更新日志
 
-本文件只记录当前公共仓库 Git 历史中可以核验的事实。当前公开版本为 **V2.1.3**；公共历史中没有单独的 V2.1.0 发布记录。
+本文件只记录当前公共仓库 Git 历史中可以核验的事实。当前公开版本为 **V2.1.4**；公共历史中没有单独的 V2.1.0 发布记录。
+
+## V2.1.4（2026-09-30）
+
+- 修正 MemoryCore 自动写回：只有 `final_result_meta.complete` 为 true 且未脱敏（`redacted` 为 false）的已完成回合 final 才会写回；截断、仅流式片段或含脱敏占位的 final 不再被当作完整最终答案写入，终态 `memory_writeback` 记为 `skipped`。MemoryCore 契约与写回架构不变。
+- 将 AGENTS.md 中过时的 ten / eleven 工具数量表述更新为当前 18 个公开工具的 Thick LCB 面。
+- 将包元数据、Bridge 上游 `clientInfo`、MCP `serverInfo`、macOS launcher 与公开文档统一为 `2.1.4`。
 
 ## V2.1.3（2026-08-24）
 

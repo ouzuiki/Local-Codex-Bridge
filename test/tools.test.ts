@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { AppServerManager } from "../src/app-server.js";
-import { RuntimeStore } from "../src/runtime.js";
+import { MAX_STREAMED_AGENT_TEXT_CHARS, RuntimeStore } from "../src/runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 import {
   DARWIN_PLATFORM_POLICY,
@@ -776,6 +776,43 @@ test("failed and interrupted turns never write back", async (t) => {
     });
   }
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(writes, 0);
+});
+
+test("completed turns with truncated, streamed-only, or redacted finals never write back", async (t) => {
+  setAutoRecallEnv(t, { TDAI_MEMORY_AUTO_RECALL: "1", TDAI_MEMORY_AUTO_WRITEBACK: "1" });
+  let writes = 0;
+  const cases: Array<[string, (runtime: RuntimeStore, threadId: string, turnId: string) => void, Record<string, boolean>]> = [
+    ["truncated", (runtime, threadId, turnId) => runtime.recordNotification("turn/completed", {
+      threadId,
+      turn: { id: turnId, status: "completed", items: [{ id: "f", type: "agentMessage", text: "x".repeat(MAX_STREAMED_AGENT_TEXT_CHARS + 1) }] },
+    }), { complete: false, truncated: true }],
+    ["streamed", (runtime, threadId, turnId) => {
+      runtime.recordNotification("item/agentMessage/delta", { threadId, turnId, itemId: "f", delta: "Partial answer" });
+      runtime.recordNotification("turn/completed", { threadId, turn: { id: turnId, status: "completed", items: [] } });
+    }, { complete: false, source_complete: false }],
+    ["redacted", (runtime, threadId, turnId) => runtime.recordNotification("turn/completed", {
+      threadId,
+      turn: { id: turnId, status: "completed", items: [{ id: "f", type: "agentMessage", text: "Use OPENAI_API_KEY=sk-live-value-123456 now" }] },
+    }), { complete: true, redacted: true }],
+  ];
+  for (const [name, complete, expectedMeta] of cases) {
+    const manager = turnManager();
+    const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+      async atomicSearch() { return { items: [] }; },
+      async conversationAdd() { writes += 1; return { acceptedIds: [] }; },
+    });
+    const accepted = object(await surface.call("codex_turn", { text: "task", cwd: `/tmp/${name}` }));
+    complete(manager.runtime, String(accepted.thread_id), String(accepted.turn_id));
+    await new Promise((resolve) => setImmediate(resolve));
+    const terminal = object(manager.runtime.observe(String(accepted.thread_id), 0, 20)?.terminal);
+    assert.equal(terminal.status, "completed", name);
+    assert.ok(terminal.final_result, name);
+    for (const [key, value] of Object.entries(expectedMeta)) {
+      assert.equal(object(terminal.final_result_meta)[key], value, `${name} ${key}`);
+    }
+    assert.equal(terminal.memory_writeback, "skipped", name);
+  }
   assert.equal(writes, 0);
 });
 
