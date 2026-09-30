@@ -834,3 +834,150 @@ test("observe wait schema and validation preserve bounded optional semantics", a
     wait_ms: MAX_OBSERVE_WAIT_MS,
   }));
 });
+
+function finalMessage(runtime: RuntimeStore, threadId: string, turnId: string, id: string, text: string): void {
+  runtime.recordNotification("item/completed", { threadId, turnId, item: { id, type: "agentMessage", text } });
+}
+
+test("a terminal observed ahead of its cursor boundary is final_result_pending until continuation reaches it", async () => {
+  for (const waiting of [false, true]) {
+    const runtime = new RuntimeStore();
+    runtime.markTurnAccepted("t", "u");
+    const accepted = runtime.currentCursor("t");
+    const woken = waiting ? runtime.observeWithWait("t", accepted, 2, 1_000) : null;
+    // The final message, other events and completion arrive in one synchronous burst.
+    for (let index = 0; index < 3; index += 1) {
+      runtime.recordNotification("item/agentMessage/delta", { threadId: "t", turnId: "u", itemId: "f", delta: `${index}` });
+    }
+    finalMessage(runtime, "t", "u", "f", "FINAL");
+    runtime.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed", items: [] } });
+    const first = (await within(woken ?? Promise.resolve(runtime.observe("t", accepted, 2))))!;
+    assert.equal(first.terminal?.status, "completed");
+    assert.equal(first.has_more, true);
+    assert.equal(first.terminal?.final_result_pending, true);
+    let page = first;
+    let pages = 1;
+    while (page.terminal?.final_result_pending) {
+      page = runtime.observe("t", page.next_cursor, 2)!;
+      pages += 1;
+      assert.ok(pages < 10);
+    }
+    assert.equal(page.next_cursor, page.current_cursor);
+    assert.equal(page.events.at(-1)?.native_type, "turn/completed");
+    assert.equal(page.terminal?.final_result, "FINAL");
+    assert.equal(page.terminal?.final_result_meta.complete, true);
+    // Replaying an older cursor is pending again; the snapshot itself is unchanged.
+    assert.equal(runtime.observe("t", accepted, 1)?.terminal?.final_result_pending, true);
+    assert.equal(runtime.observe("t", undefined, 100)?.terminal?.final_result_pending, false);
+  }
+});
+
+test("final_result_pending clears after ring eviction passes the terminal and resets on a new turn", () => {
+  const runtime = new RuntimeStore(3);
+  runtime.markTurnAccepted("t", "u");
+  finalMessage(runtime, "t", "u", "f", "DONE");
+  runtime.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed", items: [] } });
+  const stale = runtime.observe("t", 0, 1)!;
+  assert.equal(stale.terminal?.final_result_pending, true);
+  for (let index = 0; index < 5; index += 1) {
+    runtime.recordNotification("thread/tokenUsage/updated", { threadId: "t", tokenUsage: {} });
+  }
+  const lost = runtime.observe("t", 0, 1)!;
+  assert.equal(lost.cursor_lost, true);
+  assert.equal(lost.terminal?.final_result_pending, false);
+  runtime.markTurnAccepted("t", "u2");
+  assert.equal(runtime.observe("t", 0, 1)?.terminal, null);
+});
+
+test("final_result_meta distinguishes complete, truncated, streamed-only and redacted final text", () => {
+  const complete = new RuntimeStore();
+  complete.markTurnAccepted("t", "u");
+  finalMessage(complete, "t", "u", "f", "All 42 tests pass.");
+  complete.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed", items: [] } });
+  assert.deepEqual(complete.observe("t", undefined, 100)?.terminal?.final_result_meta, {
+    complete: true, source_complete: true, truncated: false, redacted: false,
+    observed_chars: 18, retained_chars: 18, retained: "head",
+  });
+
+  // A long completed item is cut once, without an in-band marker.
+  const long = new RuntimeStore();
+  long.markTurnAccepted("t", "u");
+  const text = `HEAD${"x".repeat(MAX_STREAMED_AGENT_TEXT_CHARS)}TAIL`;
+  long.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed",
+    items: [{ id: "f", type: "agentMessage", text }] } });
+  const longTerminal = long.observe("t", undefined, 100)!.terminal!;
+  assert.equal(longTerminal.final_result, text.slice(0, MAX_STREAMED_AGENT_TEXT_CHARS));
+  assert.deepEqual(longTerminal.final_result_meta, {
+    complete: false, source_complete: true, truncated: true, redacted: false,
+    observed_chars: text.length, retained_chars: MAX_STREAMED_AGENT_TEXT_CHARS, retained: "head",
+  });
+
+  // Interrupted streaming: a completed commentary is never joined with the
+  // next message's partial deltas, and the partial is not claimed complete.
+  const interrupted = new RuntimeStore();
+  interrupted.markTurnAccepted("t", "u");
+  finalMessage(interrupted, "t", "u", "commentary", "Looking at the tests. ");
+  interrupted.recordNotification("item/agentMessage/delta", { threadId: "t", turnId: "u", itemId: "final", delta: "Partial " });
+  interrupted.recordNotification("item/agentMessage/delta", { threadId: "t", turnId: "u", itemId: "final", delta: "answer" });
+  interrupted.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "interrupted", items: [] } });
+  const partial = interrupted.observe("t", undefined, 100)!.terminal!;
+  assert.equal(partial.final_result, "Partial answer");
+  assert.equal(partial.final_result_meta.complete, false);
+  assert.equal(partial.final_result_meta.source_complete, false);
+  assert.equal(partial.final_result_meta.retained, "tail");
+
+  // A start-only item or empty delta keeps the preceding final text.
+  const kept = new RuntimeStore();
+  kept.markTurnAccepted("t", "u");
+  finalMessage(kept, "t", "u", "a", "Done.");
+  kept.recordNotification("item/started", { threadId: "t", turnId: "u", item: { id: "b", type: "agentMessage", text: "" } });
+  kept.recordNotification("item/agentMessage/delta", { threadId: "t", turnId: "u", itemId: "b", delta: "" });
+  kept.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed", items: [] } });
+  assert.equal(kept.observe("t", undefined, 100)?.terminal?.final_result, "Done.");
+  assert.equal(kept.observe("t", undefined, 100)?.terminal?.final_result_meta.complete, true);
+
+  const secret = new RuntimeStore();
+  secret.markTurnAccepted("t", "u");
+  finalMessage(secret, "t", "u", "f", "Use OPENAI_API_KEY=sk-live-value-123456 now");
+  secret.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "completed", items: [] } });
+  const redacted = secret.observe("t", undefined, 100)!.terminal!;
+  assert.doesNotMatch(String(redacted.final_result), /sk-live-value/);
+  assert.equal(redacted.final_result_meta.complete, true);
+  assert.equal(redacted.final_result_meta.redacted, true);
+
+  const none = new RuntimeStore();
+  none.markTurnAccepted("t", "u");
+  none.recordNotification("turn/completed", { threadId: "t", turn: { id: "u", status: "failed", items: [] } });
+  const empty = none.observe("t", undefined, 100)!.terminal!;
+  assert.equal(empty.final_result, null);
+  assert.equal(empty.final_result_meta.complete, false);
+  assert.equal(empty.final_result_meta.observed_chars, 0);
+});
+
+test("app-server exit redacts streamed final text and marks it incomplete", () => {
+  const runtime = new RuntimeStore();
+  runtime.markTurnAccepted("t", "u");
+  runtime.recordNotification("item/agentMessage/delta", { threadId: "t", turnId: "u", itemId: "f", delta: "token: Bearer abcdefghijklmnop partial" });
+  runtime.markAppServerExited("exited");
+  const terminal = runtime.observe("t", undefined, 100)!.terminal!;
+  assert.equal(terminal.status, "appServerExited");
+  assert.doesNotMatch(String(terminal.final_result), /abcdefghijklmnop/);
+  assert.equal(terminal.final_result_meta.complete, false);
+  assert.equal(terminal.final_result_meta.redacted, true);
+  assert.equal(terminal.final_result_pending, false);
+});
+
+test("observe after Bridge state loss keeps a long persisted final beyond the generic sanitizer cut", async () => {
+  const text = "p".repeat(20_000);
+  const appServer = {
+    runtime: new RuntimeStore(),
+    request: async (): Promise<unknown> => ({ thread: { id: "stored", turns: [{ id: "turn-stored", status: "completed",
+      items: [{ type: "agentMessage", id: "m", text }] }] } }),
+  } as unknown as AppServerManager;
+  const observed = await new ControlSurface(appServer).call("codex_observe", { thread_id: "stored" }) as Record<string, any>;
+  assert.equal(observed.runtime_available, false);
+  assert.equal(observed.terminal.final_result, text);
+  assert.equal(observed.terminal.final_result_meta.complete, true);
+  assert.equal(observed.terminal.final_result_pending, false);
+  assert.equal(observed.terminal.source, "codex_app_server_thread_read");
+});

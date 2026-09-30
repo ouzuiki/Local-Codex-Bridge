@@ -84,14 +84,47 @@ export interface LateMutationError {
   error: unknown;
 }
 
+// Describes the bounded final_result text, not native terminal success.
+// complete means no source text was omitted; redacted means secret-shaped
+// spans were replaced. Only complete && !redacted is the exact native text.
+export interface FinalResultMetadata {
+  complete: boolean;
+  source_complete: boolean;
+  truncated: boolean;
+  redacted: boolean;
+  observed_chars: number;
+  retained_chars: number;
+  retained: "head" | "tail";
+}
+
+interface AgentTextMetadata {
+  itemId: string | null;
+  sourceComplete: boolean;
+  truncated: boolean;
+  redacted: boolean;
+  observedChars: number;
+  retained: "head" | "tail";
+}
+
+function emptyAgentTextMetadata(itemId: string | null = null): AgentTextMetadata {
+  return { itemId, sourceComplete: false, truncated: false, redacted: false, observedChars: 0, retained: "head" };
+}
+
 export interface TerminalSnapshot {
   turn_id: string;
   status: string;
   completed_at: string;
   final_result: string | null;
+  final_result_meta: FinalResultMetadata;
   error: unknown | null;
   turn: unknown;
   memory_writeback?: MemoryWritebackStatus;
+}
+
+// final_result_pending is true until the observed cursor continuation reaches
+// the terminal event boundary. A terminal status alone is not full delivery.
+export interface ObservedTerminal extends TerminalSnapshot {
+  final_result_pending: boolean;
 }
 
 export type MemoryWritebackStatus = "skipped" | "queued" | "written" | "failed";
@@ -110,7 +143,9 @@ interface ThreadRuntime {
   nextCursor: number;
   events: RuntimeEvent[];
   terminal: TerminalSnapshot | null;
+  terminalCursor: number | null;
   agentText: string;
+  agentTextMetadata: AgentTextMetadata;
   semanticState: "productive" | "reasoning_only";
   lastProductiveAt: string | null;
   lastProductiveCursor: number | null;
@@ -145,7 +180,7 @@ export interface RuntimeObservation {
   cursor_lost: boolean;
   has_more: boolean;
   pending_requests: unknown[];
-  terminal: TerminalSnapshot | null;
+  terminal: ObservedTerminal | null;
   semantic_progress: SemanticProgress;
 }
 
@@ -186,7 +221,7 @@ const TEXT_SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   ],
 ];
 
-function isSecretKey(key: string): boolean {
+export function isSecretKey(key: string): boolean {
   const normalized = key.replace(/[\s_-]/g, "").toLowerCase();
   return [
     "apikey",
@@ -214,7 +249,7 @@ export function redactText(value: string): string {
   return redacted;
 }
 
-function truncateString(value: string, maxChars: number): string {
+function stringHead(value: string, maxChars: number): string {
   if (value.length <= maxChars) {
     return value;
   }
@@ -223,6 +258,14 @@ function truncateString(value: string, maxChars: number): string {
   if (last >= 0xd800 && last <= 0xdbff) {
     prefix = prefix.slice(0, -1);
   }
+  return prefix;
+}
+
+function truncateString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  const prefix = stringHead(value, maxChars);
   return `${prefix}\u2026 [truncated ${value.length - prefix.length} chars]`;
 }
 
@@ -247,6 +290,66 @@ function appendStreamedAgentTextTail(current: string, delta: string): string {
     MAX_STREAMED_AGENT_TEXT_CHARS - delta.length,
   );
   return retainedCurrent + delta;
+}
+
+// A completed item is complete source text. Redact before cutting so a secret
+// cannot straddle the retention boundary; the cut is recorded, not appended.
+function completedAgentText(text: string, itemId: string | null): { text: string; metadata: AgentTextMetadata } {
+  const redacted = redactText(text);
+  const retained = stringHead(redacted, MAX_STREAMED_AGENT_TEXT_CHARS);
+  return {
+    text: retained,
+    metadata: {
+      itemId,
+      sourceComplete: true,
+      truncated: retained.length < redacted.length,
+      redacted: redacted !== text,
+      observedChars: text.length,
+      retained: "head",
+    },
+  };
+}
+
+function finalResultSnapshot(
+  agentText: string,
+  metadata: AgentTextMetadata,
+): Pick<TerminalSnapshot, "final_result" | "final_result_meta"> {
+  const redacted = redactText(agentText);
+  const text = metadata.retained === "tail"
+    ? stringTail(redacted, MAX_STREAMED_AGENT_TEXT_CHARS)
+    : stringHead(redacted, MAX_STREAMED_AGENT_TEXT_CHARS);
+  const truncated = metadata.truncated || text.length < redacted.length;
+  const observed = agentText.length > 0 || metadata.sourceComplete || metadata.observedChars > 0;
+  return {
+    final_result: observed ? text : null,
+    final_result_meta: {
+      complete: metadata.sourceComplete && !truncated,
+      source_complete: metadata.sourceComplete,
+      truncated,
+      redacted: metadata.redacted || redacted !== agentText,
+      observed_chars: metadata.observedChars,
+      retained_chars: observed ? text.length : 0,
+      retained: metadata.retained,
+    },
+  };
+}
+
+function clearTurnOutput(runtime: ThreadRuntime): void {
+  runtime.terminal = null;
+  runtime.terminalCursor = null;
+  runtime.agentText = "";
+  runtime.agentTextMetadata = emptyAgentTextMetadata();
+}
+
+// Bounded final text from a complete persisted agentMessage (or none).
+export function persistedFinalResult(
+  text: string | null,
+): Pick<TerminalSnapshot, "final_result" | "final_result_meta"> {
+  if (text === null) {
+    return finalResultSnapshot("", emptyAgentTextMetadata());
+  }
+  const completed = completedAgentText(text, null);
+  return finalResultSnapshot(completed.text, completed.metadata);
 }
 
 export function sanitizeForTransport(
@@ -426,7 +529,7 @@ function extractAgentText(method: string, params: unknown): string | undefined {
   return undefined;
 }
 
-function extractFinalFromTurn(params: unknown): string | undefined {
+function extractFinalFromTurn(params: unknown): { text: string; id: string | null } | undefined {
   const record = asRecord(params);
   const turn = asRecord(record?.turn);
   const items = turn?.items;
@@ -436,7 +539,7 @@ function extractFinalFromTurn(params: unknown): string | undefined {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = asRecord(items[index]);
     if (item?.type === "agentMessage" && typeof item.text === "string") {
-      return item.text;
+      return { text: item.text, id: stringField(item, "id") ?? null };
     }
   }
   return undefined;
@@ -567,7 +670,9 @@ export class RuntimeStore {
         nextCursor: 1,
         events: [],
         terminal: null,
+        terminalCursor: null,
         agentText: "",
+        agentTextMetadata: emptyAgentTextMetadata(),
         semanticState: "productive",
         lastProductiveAt: null,
         lastProductiveCursor: null,
@@ -586,8 +691,7 @@ export class RuntimeStore {
     }
     runtime.activeTurnId = turnId;
     runtime.status = "inProgress";
-    runtime.terminal = null;
-    runtime.agentText = "";
+    clearTurnOutput(runtime);
     this.#turnToThread.set(turnId, threadId);
     this.#signalChange(runtime);
     this.#publishUx();
@@ -652,8 +756,7 @@ export class RuntimeStore {
       } else {
         runtime.activeTurnId = input.turnId;
         runtime.status = "inProgress";
-        runtime.terminal = null;
-        runtime.agentText = "";
+        clearTurnOutput(runtime);
         this.#turnToThread.set(input.turnId, input.threadId);
         action = "turn_activated";
         reason = "runtime_idle";
@@ -663,8 +766,7 @@ export class RuntimeStore {
     } else {
       runtime.activeTurnId = input.turnId;
       runtime.status = "inProgress";
-      runtime.terminal = null;
-      runtime.agentText = "";
+      clearTurnOutput(runtime);
       this.#turnToThread.set(input.turnId, input.threadId);
       action = "turn_activated";
       reason = "runtime_idle";
@@ -736,17 +838,34 @@ export class RuntimeStore {
     if (method === "turn/started" && turnId) {
       runtime.activeTurnId = turnId;
       runtime.status = "inProgress";
-      runtime.terminal = null;
-      runtime.agentText = "";
+      clearTurnOutput(runtime);
       this.#turnToThread.set(turnId, threadId);
     }
 
     const agentText = extractAgentText(method, params);
-    if (agentText !== undefined) {
-      if (method.endsWith("/delta")) {
+    const isDelta = method === "item/agentMessage/delta";
+    // A start or empty delta carries no replacement text. Switch message
+    // identity only for actual text or an authoritative (possibly empty)
+    // completion, so one message's partial text never joins another's.
+    if (agentText !== undefined && (!isDelta || agentText.length > 0)) {
+      const record = asRecord(params);
+      const itemId = isDelta ? stringField(record, "itemId") : stringField(asRecord(record?.item), "id");
+      if (itemId !== undefined && itemId !== runtime.agentTextMetadata.itemId) {
+        runtime.agentText = "";
+        runtime.agentTextMetadata = emptyAgentTextMetadata(itemId);
+      }
+      if (isDelta) {
+        const before = runtime.agentText.length;
         runtime.agentText = appendStreamedAgentTextTail(runtime.agentText, agentText);
+        const metadata = runtime.agentTextMetadata;
+        metadata.sourceComplete = false;
+        metadata.retained = "tail";
+        metadata.observedChars = Math.min(Number.MAX_SAFE_INTEGER, metadata.observedChars + agentText.length);
+        metadata.truncated ||= before + agentText.length > runtime.agentText.length;
       } else {
-        runtime.agentText = truncateString(agentText, MAX_STREAMED_AGENT_TEXT_CHARS);
+        const completed = completedAgentText(agentText, itemId ?? null);
+        runtime.agentText = completed.text;
+        runtime.agentTextMetadata = completed.metadata;
       }
     }
 
@@ -756,17 +875,24 @@ export class RuntimeStore {
       if (terminalTurnId) {
         const status = stringField(turn, "status") ?? "unknown";
         const error = turn?.error ?? null;
-        const final = extractFinalFromTurn(params) ?? (runtime.agentText || null);
+        const final = extractFinalFromTurn(params);
+        if (final) {
+          const completed = completedAgentText(final.text, final.id);
+          runtime.agentText = completed.text;
+          runtime.agentTextMetadata = completed.metadata;
+        }
         runtime.status = status;
         runtime.activeTurnId = null;
         runtime.terminal = {
           turn_id: terminalTurnId,
           status,
           completed_at: new Date().toISOString(),
-          final_result: final === null ? null : truncateString(redactText(final), 48_000),
+          ...finalResultSnapshot(runtime.agentText, runtime.agentTextMetadata),
           error: sanitizeForTransport(error),
           turn: sanitizeForTransport(turn),
         };
+        // The turn/completed event appended below receives this cursor.
+        runtime.terminalCursor = runtime.nextCursor;
         const terminal = runtime.terminal;
         this.#turnToThread.delete(terminalTurnId);
         this.clearPendingForThread(threadId, terminalTurnId);
@@ -894,10 +1020,11 @@ export class RuntimeStore {
           turn_id: turnId,
           status: "appServerExited",
           completed_at: at,
-          final_result: runtime.agentText || null,
+          ...finalResultSnapshot(runtime.agentText, runtime.agentTextMetadata),
           error: { message: redactText(message) },
           turn: null,
         };
+        runtime.terminalCursor = runtime.nextCursor;
         this.#appendEvent(runtime, "appServer/exited", { message }, turnId);
         this.#publishUx({
           kind: "terminal",
@@ -967,7 +1094,12 @@ export class RuntimeStore {
       cursor_lost: cursorLost,
       has_more: available.length > rawEvents.length,
       pending_requests: pendingRequests,
-      terminal: runtime.terminal,
+      terminal: runtime.terminal
+        ? {
+            ...runtime.terminal,
+            final_result_pending: runtime.terminalCursor !== null && nextCursor < runtime.terminalCursor,
+          }
+        : null,
       semantic_progress: {
         classification: "derived_diagnostic",
         authoritative: false,

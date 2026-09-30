@@ -6,8 +6,10 @@ import test from "node:test";
 
 import type { AppServerManager } from "../src/app-server.js";
 import { McpStdioServer } from "../src/mcp.js";
+import { NATIVE_GROUPS } from "../src/native.js";
 import { RuntimeStore } from "../src/runtime.js";
-import { ControlSurface } from "../src/tools.js";
+import { ControlSurface, SUPPORTED_RESPOND_METHODS, TOOL_DEFINITIONS } from "../src/tools.js";
+import { VERSION } from "../src/version.js";
 
 type RpcId = string | number;
 
@@ -247,6 +249,72 @@ test("MCP stdio initializes idempotently and lists the native and compatibility 
       (memoryRecordTurn?.annotations as Record<string, unknown>).idempotentHint,
       false,
     );
+  } finally {
+    assert.equal(await client.close(), 0);
+  }
+});
+
+test("real MCP tools/list discovers the canonical surface, native methods, and dispatchable tools", async () => {
+  const client = new TestClient();
+  try {
+    const initialized = await client.request(1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "discovery", version: "1" },
+    });
+    assert.equal(((initialized.result as Record<string, any>).serverInfo).version, VERSION);
+    const listed = await client.request(2, "tools/list");
+    const tools = (listed.result as Record<string, unknown>).tools as Array<Record<string, any>>;
+    // The runtime server must serve the canonical definitions, not a stale copy.
+    assert.deepEqual(tools, JSON.parse(JSON.stringify(TOOL_DEFINITIONS)));
+    const byName = new Map(tools.map((tool) => [tool.name as string, tool]));
+    assert.deepEqual([...byName.keys()].sort(), [
+      "codex_experimental_action", "codex_experimental_read", "codex_goal", "codex_interrupt",
+      "codex_models", "codex_native_action", "codex_native_read", "codex_observe", "codex_rate_limits",
+      "codex_respond", "codex_steer", "codex_thread_lifecycle", "codex_thread_start", "codex_threads",
+      "codex_turn", "codex_turn_start", "memory_record_turn", "memory_search",
+    ]);
+
+    const required: Record<keyof typeof NATIVE_GROUPS, string[]> = {
+      codex_native_read: ["thread/list", "thread/read", "thread/turns/list", "thread/items/list", "account/read", "config/read"],
+      codex_native_action: ["thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/archive", "review/start"],
+      codex_experimental_read: ["thread/search", "thread/searchOccurrences", "thread/queue/list", "thread/timeline/list"],
+      codex_experimental_action: ["thread/queue/add", "thread/queue/update", "thread/queue/delete", "thread/queue/reorder", "thread/queue/start", "thread/settings/update"],
+    };
+    for (const group of Object.keys(NATIVE_GROUPS) as Array<keyof typeof NATIVE_GROUPS>) {
+      const variants = byName.get(group)!.inputSchema.oneOf as Array<Record<string, any>>;
+      const operations = variants.map((variant) => variant.properties.operation.const as string);
+      assert.deepEqual(operations, Object.keys(NATIVE_GROUPS[group]), `${group} discovery drifted from its allowlist`);
+      for (const method of required[group]) assert.ok(operations.includes(method), `${group} must expose ${method}`);
+      const read = group.endsWith("_read");
+      for (const variant of variants) {
+        assert.equal(variant.properties.delivery?.enum?.join(), read ? "bounded,exact" : undefined, `${group} delivery discovery`);
+      }
+      assert.equal(/delivery:"exact"/.test(byName.get(group)!.description), read, `${group} description`);
+    }
+
+    assert.deepEqual(byName.get("codex_goal")!.inputSchema.properties.operation.enum, ["set", "get", "clear", "reconnect"]);
+    assert.deepEqual(byName.get("codex_thread_lifecycle")!.inputSchema.properties.operation.enum, ["fork", "compact"]);
+    const respondMethods = String(byName.get("codex_respond")!.inputSchema.properties.method.description);
+    const supported = [
+      "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval",
+      "item/tool/requestUserInput", "item/tool/call", "mcpServer/elicitation/request",
+      "execCommandApproval", "applyPatchApproval",
+    ];
+    assert.deepEqual([...SUPPORTED_RESPOND_METHODS].sort(), [...supported].sort());
+    for (const method of supported) assert.ok(respondMethods.includes(method), `tools/list must name respond method ${method}`);
+    const observe = String(byName.get("codex_observe")!.description);
+    for (const term of ["final_result_pending", "final_result_meta", "next_cursor"]) assert.ok(observe.includes(term), `codex_observe must describe ${term}`);
+
+    // Every listed tool is dispatched by the runtime; argument validation, not
+    // "Unknown tool", rejects the probe before any app-server contact.
+    let id = 100;
+    for (const name of byName.keys()) {
+      const response = await client.request(id += 1, "tools/call", { name, arguments: { discovery_probe: true } });
+      assert.equal(response.error, undefined, `${name} must be a known tool`);
+      assert.equal((response.result as Record<string, unknown>).isError, true, name);
+      assert.doesNotMatch(String(toolPayload(response).error), /Unknown tool/, name);
+    }
   } finally {
     assert.equal(await client.close(), 0);
   }

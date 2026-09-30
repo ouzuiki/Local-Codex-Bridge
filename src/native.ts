@@ -1,5 +1,5 @@
 import type { AppServerManager } from "./app-server.js";
-import { sanitizeForTransport } from "./runtime.js";
+import { isSecretKey, redactText, sanitizeForTransport } from "./runtime.js";
 import type { PlatformPolicy } from "./platform.js";
 
 type FieldKind = "id" | "nullableId" | "text" | "cursor" | "cwd" | "cwdFilter" | "count" | "boolean" | "nullableBoolean" | "ids" | "strings" | "cwds" | "input" | "rawItems" | "object" | "reviewer" | "approval" | "sandbox" | "direction" | "itemsView" | "multiAgent" | "reviewTarget" | "gitInfo" | "appearance" | "jsonValue" | "featureMap" | "inline";
@@ -98,6 +98,20 @@ export const NATIVE_GROUPS = {
   codex_experimental_action: EXPERIMENTAL_ACTION,
 } as const;
 
+// Exact delivery is a result-body bound for read groups, separate from live
+// observe sanitizer budgets. It returns the native result unchanged or fails
+// whole; secret-shaped content fails closed rather than being exposed.
+export const MAX_EXACT_RESULT_BYTES = 256 * 1024;
+// Defensive serialization guard, not a native depth contract.
+const MAX_EXACT_DEPTH = 256;
+
+const DELIVERY_SCHEMA = {
+  type: "string",
+  enum: ["bounded", "exact"],
+  default: "bounded",
+  description: "bounded (default) sanitizes and bounds the result; delivery.lossless reports whether anything was redacted or truncated. exact returns the unaltered native result or fails whole with exact_delivery_failed (content_policy, structure, or size); never partial pages, synthetic cursors, or redacted text, and secret-shaped content is refused rather than exposed.",
+};
+
 function fieldSchema(kind: FieldKind): Record<string, unknown> {
   switch (kind) {
     case "id": return { type: "string", minLength: 1, maxLength: 200 };
@@ -147,6 +161,7 @@ export function nativeInputSchema(group: keyof typeof NATIVE_GROUPS): Record<str
       properties: {
         operation: { const: operation },
         params: { type: "object", properties: Object.fromEntries(Object.entries(spec.fields).map(([key, kind]) => [key, fieldSchema(kind)])), required: spec.required ?? [], additionalProperties: false },
+        ...(group.endsWith("_read") ? { delivery: DELIVERY_SCHEMA } : {}),
       },
       required: ["operation", "params"],
       additionalProperties: false,
@@ -234,10 +249,46 @@ function validate(kind: FieldKind, value: unknown, key: string, platform: Platfo
   return value;
 }
 
+function exactDeliveryError(reason: "content_policy" | "structure" | "size", detail: string): Error {
+  return new Error(`exact_delivery_failed: ${reason}: ${detail} The native read succeeded; no partial data, cursor, redacted substitute, or fallback read was returned.`);
+}
+
+// Validates without rewriting. Anything the bounded sanitizer would redact is
+// refused, so exact never weakens the transport redaction boundary.
+function assertExactJson(value: unknown, depth = 0, active = new Set<object>()): void {
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw exactDeliveryError("structure", "non-finite number.");
+    return;
+  }
+  if (typeof value === "string") {
+    if (redactText(value) !== value) throw exactDeliveryError("content_policy", "secret-shaped text would require redaction; use bounded delivery for a redacted projection.");
+    return;
+  }
+  if (typeof value !== "object" || depth >= MAX_EXACT_DEPTH || active.has(value)) {
+    throw exactDeliveryError("structure", "value is not JSON-safe or exceeds the defensive nesting guard.");
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    throw exactDeliveryError("structure", "value is not a plain JSON object.");
+  }
+  active.add(value);
+  for (const [key, child] of Object.entries(value)) {
+    if (isSecretKey(key) && child !== null && typeof child !== "boolean") {
+      throw exactDeliveryError("content_policy", "a secret-named field would require redaction; use bounded delivery for a redacted projection.");
+    }
+    assertExactJson(child, depth + 1, active);
+  }
+  active.delete(value);
+}
+
 export async function nativeCall(appServer: AppServerManager, platform: PlatformPolicy, group: keyof typeof NATIVE_GROUPS, raw: unknown): Promise<unknown> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("arguments must be an object");
   const args = raw as Record<string, unknown>;
-  if (Object.keys(args).some((key) => key !== "operation" && key !== "params")) throw new Error("Unknown top-level argument");
+  const readGroup = group.endsWith("_read");
+  if (Object.keys(args).some((key) => key !== "operation" && key !== "params" && !(readGroup && key === "delivery"))) throw new Error("Unknown top-level argument");
+  const delivery = args.delivery ?? "bounded";
+  if (delivery !== "bounded" && delivery !== "exact") throw new Error("delivery must be bounded or exact");
   if (typeof args.operation !== "string" || !Object.hasOwn(NATIVE_GROUPS[group], args.operation)) throw new Error("Unknown native operation for this tool");
   const operation = args.operation;
   const spec = (NATIVE_GROUPS[group] as Record<string, NativeSpec>)[operation]!;
@@ -257,5 +308,16 @@ export async function nativeCall(appServer: AppServerManager, platform: Platform
     if (operation === "thread/fork" && id === params.threadId) throw new Error("thread/fork returned the source thread id; native outcome requires reconciliation");
     if (operation !== "thread/read") appServer.runtime.ensureThread(id);
   }
-  return { source: "codex_app_server", stability: group.startsWith("codex_experimental") ? "experimental" : "stable", operation, result: sanitizeForTransport(result) };
+  const envelope = { source: "codex_app_server", stability: group.startsWith("codex_experimental") ? "experimental" : "stable", operation };
+  if (delivery === "exact") {
+    assertExactJson(result);
+    const exact = { ...envelope, delivery: { mode: "exact", lossless: true }, result };
+    const bytes = Buffer.byteLength(JSON.stringify(exact), "utf8");
+    if (bytes > MAX_EXACT_RESULT_BYTES) {
+      throw exactDeliveryError("size", `result body is ${bytes} bytes, above the ${MAX_EXACT_RESULT_BYTES}-byte bound; request a smaller native page or narrower scope (for example thread/items/list for one turn).`);
+    }
+    return exact;
+  }
+  const projected = sanitizeForTransport(result);
+  return { ...envelope, delivery: { mode: "bounded", lossless: JSON.stringify(projected) === JSON.stringify(result) }, result: projected };
 }

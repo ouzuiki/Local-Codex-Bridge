@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { AppServerManager } from "../src/app-server.js";
 import { RuntimeStore, type RpcId } from "../src/runtime.js";
-import { ControlSurface } from "../src/tools.js";
+import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 import { NATIVE_GROUPS } from "../src/native.js";
 
 class NativeFixture extends AppServerManager {
@@ -127,4 +127,64 @@ test("dynamic tool and MCP elicitation requests round-trip exact pending IDs", a
   await assert.rejects(surface.call("codex_respond", { request_id: "future-raw-id", thread_id: "native-thread", turn_id: "native-turn",
     method: "future/newRequest", response: { guessed: true } }), /Unsupported app-server request method/);
   assert.equal((native.runtime.observe("native-thread", 0, 10)?.pending_requests as unknown[]).length, 1);
+});
+
+class PagedFixture extends NativeFixture {
+  constructor(private readonly page: unknown) { super(); }
+  override async request(method: string, params: unknown): Promise<unknown> {
+    this.calls.push({ method, params });
+    return method === "thread/read" ? { thread: { id: "other-thread" } } : this.page;
+  }
+}
+
+test("read groups separate bounded projection from exact lossless delivery", async () => {
+  const items = Array.from({ length: 100 }, (_, index) => ({ id: `item-${index}`, text: "t".repeat(index === 0 ? 20_000 : 10) }));
+  const page = { data: items, nextCursor: "cursor-after-100" };
+  const surface = new ControlSurface(new PagedFixture(page));
+  const call = { operation: "thread/items/list", params: { threadId: "native-thread", limit: 100 } };
+
+  const bounded = await surface.call("codex_native_read", call) as Record<string, any>;
+  assert.deepEqual(bounded.delivery, { mode: "bounded", lossless: false });
+  assert.notDeepEqual(bounded.result, page);
+
+  const exact = await surface.call("codex_native_read", { ...call, delivery: "exact" }) as Record<string, any>;
+  assert.deepEqual(exact.delivery, { mode: "exact", lossless: true });
+  assert.deepEqual(exact.result, page);
+  assert.equal(exact.result.data.length, 100);
+  assert.equal(exact.result.nextCursor, "cursor-after-100");
+
+  const small = await new ControlSurface(new PagedFixture({ data: [], nextCursor: null })).call("codex_experimental_read",
+    { operation: "thread/queue/list", params: { threadId: "native-thread" } }) as Record<string, any>;
+  assert.deepEqual(small.delivery, { mode: "bounded", lossless: true });
+});
+
+test("exact delivery fails whole instead of redacting, cutting, or exposing secrets", async () => {
+  const call = (page: unknown) => new ControlSurface(new PagedFixture(page)).call("codex_native_read",
+    { operation: "thread/turns/list", params: { threadId: "native-thread" }, delivery: "exact" });
+  await assert.rejects(call({ data: [{ text: "export OPENAI_API_KEY=sk-live-secret-value" }], nextCursor: null }), /^Error: exact_delivery_failed: content_policy:/);
+  await assert.rejects(call({ data: [{ apiKey: "opaque" }], nextCursor: null }), /exact_delivery_failed: content_policy:/);
+  await assert.rejects(call({ data: [{ text: "x".repeat(300 * 1024) }], nextCursor: null }), /exact_delivery_failed: size: .*262144-byte bound/);
+  const accepted = await call({ data: [{ tokenUsage: { total: 1 }, token: null }], nextCursor: null }) as Record<string, any>;
+  assert.equal(accepted.delivery.lossless, true);
+
+  const bounded = await new ControlSurface(new PagedFixture({ data: [{ text: "Bearer abcdefghijklmnop" }] })).call("codex_native_read",
+    { operation: "thread/turns/list", params: { threadId: "native-thread" } }) as Record<string, any>;
+  assert.equal(bounded.delivery.lossless, false);
+  assert.doesNotMatch(JSON.stringify(bounded.result), /abcdefghijklmnop/);
+});
+
+test("exact delivery is limited to read groups and keeps native identity checks", async () => {
+  const surface = new ControlSurface(new PagedFixture({}));
+  await assert.rejects(surface.call("codex_native_action", { operation: "thread/archive", params: { threadId: "native-thread" }, delivery: "exact" }), /Unknown top-level argument/);
+  await assert.rejects(surface.call("codex_experimental_action", { operation: "thread/queue/delete", params: { threadId: "native-thread", queuedSubmissionId: "q" }, delivery: "exact" }), /Unknown top-level argument/);
+  await assert.rejects(surface.call("codex_native_read", { operation: "thread/turns/list", params: { threadId: "native-thread" }, delivery: "partial" }), /delivery must be bounded or exact/);
+  await assert.rejects(surface.call("codex_native_read", { operation: "thread/read", params: { threadId: "native-thread" }, delivery: "exact" }), /different thread id/);
+  for (const group of ["codex_native_read", "codex_experimental_read"] as const) {
+    const variants = (TOOL_DEFINITIONS.find((tool) => tool.name === group)!.inputSchema.oneOf as Array<Record<string, any>>);
+    assert.ok(variants.every((variant) => variant.properties.delivery?.enum?.join() === "bounded,exact"));
+  }
+  for (const group of ["codex_native_action", "codex_experimental_action"] as const) {
+    const variants = (TOOL_DEFINITIONS.find((tool) => tool.name === group)!.inputSchema.oneOf as Array<Record<string, any>>);
+    assert.ok(variants.every((variant) => variant.properties.delivery === undefined));
+  }
 });

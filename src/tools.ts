@@ -10,13 +10,14 @@ import {
 } from "@ouzuiki/worker-memory-contract";
 import {
   MAX_OBSERVE_WAIT_MS,
+  persistedFinalResult,
   sanitizeForTransport,
   type TerminalNotification,
   type RpcId,
 } from "./runtime.js";
 import { platformPolicyFor, type PlatformPolicy } from "./platform.js";
 import type { MemoryCoreClient } from "./memory-core-client.js";
-import { NATIVE_GROUPS, nativeCall, nativeInputSchema } from "./native.js";
+import { MAX_EXACT_RESULT_BYTES, NATIVE_GROUPS, nativeCall, nativeInputSchema } from "./native.js";
 
 export interface ToolDefinition {
   name: string;
@@ -72,7 +73,7 @@ const REVIEW_SOURCE_DYNAMIC_TOOL = { type: "function", name: "review_source",
 
 type PublicApprovalPolicy = "untrusted" | "on-request" | "never";
 
-const SUPPORTED_RESPOND_METHODS = new Set([
+export const SUPPORTED_RESPOND_METHODS: ReadonlySet<string> = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "item/permissions/requestApproval",
@@ -110,7 +111,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   ...(["codex_native_read", "codex_native_action", "codex_experimental_read", "codex_experimental_action"] as const).map((name) => ({
     name,
     title: name.replaceAll("_", " "),
-    description: `Bounded ${name.includes("experimental") ? "experimental" : "stable"} native app-server ${name.endsWith("read") ? "read" : "action"} allowlist. Uses exact native method names and parameters.`,
+    description: `Bounded ${name.includes("experimental") ? "experimental" : "stable"} native app-server ${name.endsWith("read") ? "read" : "action"} allowlist. Uses exact native method names and parameters. Results report delivery.lossless; false means the bounded projection redacted or truncated native content.${name.endsWith("read") ? ` Optional delivery:"exact" returns the unaltered native result or fails whole with exact_delivery_failed (content_policy, structure, or size; ${MAX_EXACT_RESULT_BYTES} result-body bytes); it never returns partial data or redacted text.` : ""}`,
     inputSchema: nativeInputSchema(name),
     annotations: { title: name, readOnlyHint: name.endsWith("read"), destructiveHint: name.endsWith("action"), idempotentHint: name.endsWith("read"), openWorldHint: false },
   })),
@@ -340,7 +341,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: "codex_observe",
     title: "Observe Codex Turn",
     description:
-      "Read bounded incremental sanitized Bridge runtime events, live semantic progress, pending requests, and terminal output for a thread. Optional wait_ms performs one bounded event-driven wait only when the live turn is active and the current snapshot has nothing useful; it is not polling or stall detection. After Bridge process loss, falls back to persistent thread/read history and marks live state and semantic progress unreconstructable. A long interval with no new command or output can still mean Codex is actively reasoning; absence of new command activity alone is not evidence of a stall. Normal supervision lets the authorized turn run autonomously and observes for pending requests or completion. Steer only for a concrete semantic correction or changed intent, and interrupt only for explicit cancellation or an exceptional safety/recovery need.",
+      "Read bounded incremental sanitized Bridge runtime events, live semantic progress, pending requests, and terminal output for a thread. Optional wait_ms performs one bounded event-driven wait only when the live turn is active and the current snapshot has nothing useful; it is not polling or stall detection. After Bridge process loss, falls back to persistent thread/read history and marks live state and semantic progress unreconstructable. A terminal status is not full delivery: terminal.final_result_pending is true until next_cursor reaches the terminal event, so continue with next_cursor until it is false. terminal.final_result_meta.complete is false when final_result is truncated or partial (for example streamed-only or interrupted text), and redacted marks masked secrets; read the persisted turn through codex_native_read with delivery exact when complete content is needed. A long interval with no new command or output can still mean Codex is actively reasoning; absence of new command activity alone is not evidence of a stall. Normal supervision lets the authorized turn run autonomously and observes for pending requests or completion. Steer only for a concrete semantic correction or changed intent, and interrupt only for explicit cancellation or an exceptional safety/recovery need.",
     inputSchema: {
       type: "object",
       properties: {
@@ -428,7 +429,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
         thread_id: { type: "string", minLength: 1, maxLength: 200, description: "Exact pending-request thread scope." },
         turn_id: { type: "string", minLength: 1, maxLength: 200, description: "Exact turn scope when the pending request has one." },
-        method: { type: "string", minLength: 1, maxLength: 300, description: "Exact app-server request method." },
+        method: { type: "string", minLength: 1, maxLength: 300, description: `Exact app-server request method. Supported: ${[...SUPPORTED_RESPOND_METHODS].join(", ")}. Other methods are rejected and remain pending and observable.` },
         decision: {
           type: "string",
           enum: ["accept", "acceptForSession", "decline", "cancel"],
@@ -1027,14 +1028,15 @@ function storedTerminal(threadResult: unknown): unknown {
       break;
     }
   }
-  return sanitizeForTransport({
-    turn_id: turn.id,
-    status,
-    completed_at: null,
-    final_result: finalResult,
-    error: turn.error ?? null,
+  // Final text uses the live 48k bound and completeness metadata instead of
+  // the generic sanitizer's silent 12k string cut.
+  return {
+    ...(sanitizeForTransport({ turn_id: turn.id, status, completed_at: null }) as Record<string, unknown>),
+    ...persistedFinalResult(finalResult),
+    final_result_pending: false,
+    error: sanitizeForTransport(turn.error ?? null),
     source: "codex_app_server_thread_read",
-  });
+  };
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -1607,7 +1609,7 @@ export class ControlSurface {
       includeTurns: true,
     });
     throwIfAborted(signal);
-    return sanitizeForTransport({
+    const degraded = sanitizeForTransport({
       runtime_available: false,
       live_state_reconstructable: false,
       note: "This Bridge process has no in-memory runtime for the thread. Live event ring and pending requests cannot be reconstructed after process loss.",
@@ -1623,12 +1625,15 @@ export class ControlSurface {
       cursor_lost: false,
       has_more: false,
       pending_requests: [],
-      terminal: storedTerminal(result),
+      terminal: null,
       semantic_progress: null,
       semantic_progress_reconstructable: false,
       stored_thread: responseRecord(result, "thread/read").thread,
       source: "codex_app_server_thread_read",
-    });
+    }) as Record<string, unknown>;
+    // Assigned after the generic sanitizer so its bounded final is not re-cut.
+    degraded.terminal = storedTerminal(result);
+    return degraded;
   }
 
   async #steer(args: Record<string, unknown>): Promise<unknown> {
