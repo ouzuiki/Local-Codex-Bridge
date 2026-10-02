@@ -61,3 +61,21 @@ test("Contract v1 projects typed Codex HITL metadata while retaining native scop
   assert.equal(pending[0]?.scope.native_request_ref, "req-1");
   assert.equal(pending[0]?.method, "item/commandExecution/requestApproval");
 });
+
+test("numeric native item/tool/call id keeps the exact generic dynamic tool contract", () => {
+  const runtime = new RuntimeStore();
+  runtime.markTurnAccepted("sol-thread", "sol-turn");
+  const params = { threadId: "sol-thread", turnId: "sol-turn", callId: "call-1",
+    namespace: null, tool: "delivery_action", arguments: { capability: { kind: "repo_local_build_test", target: "/work" },
+      input: { argv: ["pwd"] } } };
+  runtime.recordServerRequest(53, "item/tool/call", params);
+  const pending = (runtime.pendingForThread("sol-thread") as Array<Record<string, any>>)[0]!;
+  assert.equal(pending.request_id, 53);
+  assert.equal(pending.scope.native_request_ref, 53);
+  assert.equal(pending.kind, "dynamic_tool");
+  assert.equal(pending.method, "item/tool/call");
+  assert.equal(pending.native_method, "item/tool/call");
+  assert.deepEqual(pending.response_contract, { type: "dynamic_tool", required: ["contentItems", "success"] });
+  assert.deepEqual(pending.params, params);
+  assert.deepEqual(pending.payload, params);
+});
