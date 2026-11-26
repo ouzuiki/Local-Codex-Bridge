@@ -31,6 +31,24 @@ export interface GoalRecord {
 
 interface ClearedGoal { schema: "CodexBridgeGoalCleared"; version: 1; threadId: string }
 
+/**
+ * Flush a directory entry after rename/create. Windows cannot fsync a
+ * directory handle (EPERM/EISDIR/EINVAL); NTFS journals the rename itself,
+ * so only that platform-specific refusal is tolerated. File data is always
+ * fsynced before this point.
+ */
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const directory = await open(directoryPath, constants.O_RDONLY);
+  try {
+    await directory.sync();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!(process.platform === "win32" && (code === "EPERM" || code === "EISDIR" || code === "EINVAL"))) throw error;
+  } finally {
+    await directory.close();
+  }
+}
+
 export function goalDigest(objective: string): string {
   return `sha256:${createHash("sha256").update(objective).digest("hex")}`;
 }
@@ -96,8 +114,7 @@ export class GoalStore {
     try { await file.writeFile(`${JSON.stringify(value)}\n`); await file.sync(); }
     finally { await file.close(); }
     await rename(temporary, path);
-    const directory = await open(dirname(path), constants.O_RDONLY);
-    try { await directory.sync(); } finally { await directory.close(); }
+    await syncDirectory(dirname(path));
   }
 
   async clear(threadId: string): Promise<void> {
@@ -113,8 +130,7 @@ export class GoalStore {
     if (!file) return false;
     try { await file.writeFile(record.id); await file.sync(); }
     finally { await file.close(); }
-    const directory = await open(dirname(path), constants.O_RDONLY);
-    try { await directory.sync(); } finally { await directory.close(); }
+    await syncDirectory(dirname(path));
     return true;
   }
 }

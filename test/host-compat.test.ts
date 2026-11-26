@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { AppServerManager } from "../src/app-server.js";
 import { GoalStore, goalDigest, type GoalRecord } from "../src/goal-store.js";
+import { LINUX_PLATFORM_POLICY } from "../src/platform.js";
 import { RuntimeStore } from "../src/runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 
@@ -42,6 +43,10 @@ async function withStore(t: { after(fn: () => Promise<void>): void }): Promise<G
   return new GoalStore(directory);
 }
 
+// These cases exercise delivery semantics with POSIX "/work" fixtures, so they
+// pin a POSIX cwd policy instead of inheriting the host's path rules.
+const POSIX_FIXTURE_POLICY = LINUX_PLATFORM_POLICY;
+
 test("Host delivery boundaries and Thick native tools coexist", async () => {
   const names = TOOL_DEFINITIONS.map(item => item.name);
   for (const name of ["codex_thread_start", "codex_turn_start", "codex_native_read", "codex_native_action",
@@ -49,7 +54,7 @@ test("Host delivery boundaries and Thick native tools coexist", async () => {
   assert.ok(!names.includes("codex_checkpoint"));
   for (const version of [2, 3] as const) {
     const native = new NativeFixture();
-    const result = await new ControlSurface(native).call("codex_turn", {
+    const result = await new ControlSurface(native, undefined, POSIX_FIXTURE_POLICY).call("codex_turn", {
       text: "task", cwd: "/work", sandbox: version === 2 ? "workspace-write" : "read-only", approval_policy: "never",
       delivery_action_tool: { version },
     }) as Record<string, unknown>;
@@ -72,7 +77,7 @@ test("both delivery versions reject authority and instruction turn options befor
   for (const version of [2, 3] as const) {
     for (const [key, value] of Object.entries(options)) {
       const native = new NativeFixture();
-      await assert.rejects(new ControlSurface(native).call("codex_turn", {
+      await assert.rejects(new ControlSurface(native, undefined, POSIX_FIXTURE_POLICY).call("codex_turn", {
         text: "task", cwd: "/work", sandbox: version === 2 ? "workspace-write" : "read-only",
         approval_policy: "never", delivery_action_tool: { version }, native_turn_options: { [key]: value },
       }), /Unknown argument field|does not allow native_turn_options/);
@@ -83,7 +88,7 @@ test("both delivery versions reject authority and instruction turn options befor
 
 test("codex_turn rejects experimental authority options outside delivery mode", async () => {
   const native = new NativeFixture();
-  await assert.rejects(new ControlSurface(native).call("codex_turn", {
+  await assert.rejects(new ControlSurface(native, undefined, POSIX_FIXTURE_POLICY).call("codex_turn", {
     text: "task", cwd: "/work", native_turn_options: { runtimeWorkspaceRoots: ["/"] },
   }), /Unknown argument field/);
   assert.deepEqual(native.calls, []);
