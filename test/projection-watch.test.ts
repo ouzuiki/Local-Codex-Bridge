@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -184,9 +184,10 @@ test("argument parsing and default path follow projection environment convention
     LOCAL_CODEX_BRIDGE_UX_PROJECTION: "/x/p.json",
   });
   assert.deepEqual([...parsed.options!.threads], ["a", "b"]);
-  assert.equal(parsed.options!.projectionPath, "/x/p.json");
+  // Configured paths are resolve()d, so expectations follow the host path semantics.
+  assert.equal(parsed.options!.projectionPath, resolve("/x/p.json"));
   assert.equal(parsed.options!.pollMs, 500);
-  assert.equal(defaultProjectionPath({ LUMEN_CODEX_V2_UX_PROJECTION: "/legacy.json" }, "linux"), "/legacy.json");
+  assert.equal(defaultProjectionPath({ LUMEN_CODEX_V2_UX_PROJECTION: "/legacy.json" }, "linux"), resolve("/legacy.json"));
   assert.equal(
     defaultProjectionPath({ LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" }, "win32").endsWith("ux-projection.json"),
     true,
