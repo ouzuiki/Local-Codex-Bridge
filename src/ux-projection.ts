@@ -16,13 +16,19 @@ export interface UxCounts {
   terminal: number;
 }
 
-export type UxSignalKind = "waiting_approval" | "waiting_user_input" | "terminal";
+export type UxSignalKind =
+  | "waiting_approval"
+  | "waiting_user_input"
+  | "request_resolved"
+  | "terminal";
 
 export interface UxSignalInput {
   kind: UxSignalKind;
   thread_id: string;
   turn_id: string | null;
   status: string;
+  // Raw app-server request ID for request signals; never request parameters.
+  request_id?: string | number;
 }
 
 export interface UxSignal extends UxSignalInput {

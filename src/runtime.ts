@@ -621,6 +621,16 @@ function redactReasoningPayload(method: string, params: unknown): unknown {
   return visit(params);
 }
 
+function resolvedSignal(request: PendingServerRequest, status: "responded" | "resolved"): UxSignalInput {
+  return {
+    kind: "request_resolved",
+    thread_id: request.threadId,
+    turn_id: request.turnId ?? null,
+    status,
+    request_id: request.rawId,
+  };
+}
+
 export class RuntimeStore {
   readonly #threads = new Map<string, ThreadRuntime>();
   readonly #pending = new Map<string, PendingServerRequest>();
@@ -826,7 +836,7 @@ export class RuntimeStore {
         if (runtime) {
           this.#signalChange(runtime);
         }
-        this.#publishUx();
+        this.#publishUx(pending ? resolvedSignal(pending, "resolved") : undefined);
       }
     }
     if (!threadId) {
@@ -959,6 +969,7 @@ export class RuntimeStore {
       thread_id: threadId,
       turn_id: turnId ?? null,
       status: "waiting",
+      request_id: id,
     });
     return "recorded";
   }
@@ -999,7 +1010,7 @@ export class RuntimeStore {
     if (runtime) {
       this.#signalChange(runtime);
     }
-    this.#publishUx();
+    this.#publishUx(resolvedSignal(request, "responded"));
   }
 
   releasePending(request: PendingServerRequest): void {
