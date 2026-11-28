@@ -30,7 +30,9 @@ Bridge 的能力面有意覆盖更多原生 app-server 操作；它的状态与�
 
 ## 当前测试候选版本
 
-**V2.1.4** · [CHANGELOG](CHANGELOG.md)
+**V2.2.0** · [CHANGELOG](CHANGELOG.md)
+
+V2.2.0 为可选 UX projection 增加 `request_resolved` 信号，并提供本地 watcher CLI，让 supervisor 在 approval 出现、被处理或 turn 终态时被唤醒，而无需轮询或消耗模型调用。
 
 V2.1.4 是补丁版本：MemoryCore 自动写回不再把截断、仅流式或脱敏的 final 当作完整最终答案写入，并同步 18 工具文档表述。
 
@@ -419,6 +421,29 @@ Bridge 的：
 主要存在于内存中。
 
 Bridge 重启后，`codex_observe` 可以从 native persisted history 回退恢复有限观察信息，但不会伪造已经丢失的 live state。
+
+### 可选：UX projection 与 watcher CLI
+
+设置 `LOCAL_CODEX_BRIDGE_UX_PROJECTION=<absolute path>` 后，Bridge 会原子替换写入一个有界 JSON 文件（最近 32 条信号与 active / waiting / terminal 计数）。信号只有 `waiting_approval`、`waiting_user_input`、`request_resolved`、`terminal` 四类，只携带 thread / turn / request ID、状态与时间，不含请求参数、命令文本或结果内容。文件权限跟随 Bridge 进程 umask；未设置该变量时不写任何文件。
+
+同一 OS user 下的 supervisor 可以运行：
+
+```bash
+node <repository>/dist/src/watch-cli.js --thread <thread_id> [--until-terminal]
+```
+
+它默认读取 `LOCAL_CODEX_BRIDGE_UX_PROJECTION`，未设置时读取 `~/.local/state/LocalCodexBridge/ux-projection.json`（Windows 为 `%LOCALAPPDATA%\LocalCodexBridge\ux-projection.json`），也可用 `--projection` 指定。它通过 `fs.watch` 感知变化，并每 30 秒兜底重读一次；只在变化时向 stdout 输出一行 NDJSON：
+
+| `event` | 含义 |
+| --- | --- |
+| `approval_requested` / `input_requested` | 出现新的 pending request；启动时仍未处理的请求以 `replayed: true` 补报 |
+| `request_resolved` | 请求已被回复（`responded`）或被原生侧解决（`resolved`） |
+| `turn_terminal` | turn 进入终态（`status` 为原生状态） |
+| `signal_gap` | 有界信号历史有缺口 |
+| `bridge_restarted` / `bridge_stopped` | Bridge generation 变化或 projection 文件消失；之前的 live pending state 已丢失 |
+| `projection_unavailable` / `projection_available` | 启动时 projection 文件不存在 / 之后出现 |
+
+watcher 只是唤醒提示：收到一行后，应通过 `codex_observe` 读取 pending request 与 terminal 的真实内容，再由 supervisor 或用户决定是否 `codex_respond`。它不监听任何端口，不回答请求，也不改变任何 MCP 工具行为。
 
 ## Deliberate non-goals
 

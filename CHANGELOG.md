@@ -1,6 +1,12 @@
 # 更新日志
 
-本文件只记录当前公共仓库 Git 历史中可以核验的事实。当前公开版本为 **V2.1.4**；公共历史中没有单独的 V2.1.0 发布记录。
+本文件只记录当前公共仓库 Git 历史中可以核验的事实。当前公开版本为 **V2.2.0**；公共历史中没有单独的 V2.1.0 发布记录。
+
+## V2.2.0（2026-11-26）
+
+- 可选 UX projection 新增 `request_resolved` 信号：supervisor 通过 `codex_respond` 回复（`responded`）或原生 `serverRequest/resolved`（`resolved`）使 pending request 消失时各记录一条；请求类信号新增可选 `request_id`（原始 app-server request ID）。projection 仍不含任何请求参数、命令文本或结果内容。
+- 新增本地 watcher CLI `dist/src/watch-cli.js`：通过 `fs.watch` 读取 projection 文件，仅在 approval / user-input 请求出现、请求被处理、turn 进入终态或 Bridge generation 变化时输出一行 NDJSON，安静时不输出；支持 `--thread` 过滤与 `--until-terminal`。它只是唤醒提示，不新增监听端口，不改变 18 个 MCP 工具或 `codex_observe` 的行为，也不做任何审批决定。
+- 将包元数据、Bridge 上游 `clientInfo`、MCP `serverInfo`、macOS launcher 与公开文档统一为 `2.2.0`。
 
 ## V2.1.4（2026-09-30）
 
