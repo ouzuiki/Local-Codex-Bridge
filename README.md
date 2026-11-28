@@ -443,6 +443,20 @@ node <repository>/dist/src/watch-cli.js --thread <thread_id> [--until-terminal]
 | `bridge_restarted` / `bridge_stopped` | Bridge generation 变化或 projection 文件消失；之前的 live pending state 已丢失 |
 | `projection_unavailable` / `projection_available` | 启动时 projection 文件不存在 / 之后出现 |
 
+projection 只描述写它的那一个 Bridge 进程。若 MCP 客户端为每个会话各起一个 stdio Bridge，这些进程既不共享 live state，也不应共享同一个 projection 文件。只支持 stdio 的客户端（例如桌面 MCP 入口）应改为通过中继连接唯一的 socket 激活 Bridge：
+
+```bash
+node <deployment>/dist/src/socket-relay-cli.js   # LCB_SOCKET_PATH 可覆盖默认 socket
+```
+
+中继只转发字节，不解析协议、不持有状态，socket 不存在时以空 stdout 退出。多个会话共享同一个 Bridge 时，任一会话都能看到并回答同一 OS user 下任意 thread 的 pending request（与 tunnel 相同的信任边界）；原始 request ID 与 scope 仍逐项核对，并发回答同一请求只会成功一次。
+
+Linux / systemd 下可用连线检查确认监督者实际调用的入口确实连到了写 projection 的进程（只发送 `initialize`）：
+
+```bash
+node <deployment>/dist/src/wiring-check-cli.js --entry <absolute MCP launcher> [--expect-version <x.y.z>]
+```
+
 watcher 只是唤醒提示：收到一行后，应通过 `codex_observe` 读取 pending request 与 terminal 的真实内容，再由 supervisor 或用户决定是否 `codex_respond`。它不监听任何端口，不回答请求，也不改变任何 MCP 工具行为。
 
 ## Deliberate non-goals
