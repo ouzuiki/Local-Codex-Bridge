@@ -6,6 +6,8 @@
 
 - 可选 UX projection 新增 `request_resolved` 信号：supervisor 通过 `codex_respond` 回复（`responded`）或原生 `serverRequest/resolved`（`resolved`）使 pending request 消失时各记录一条；请求类信号新增可选 `request_id`（原始 app-server request ID）。projection 仍不含任何请求参数、命令文本或结果内容。
 - 新增本地 watcher CLI `dist/src/watch-cli.js`：通过 `fs.watch` 读取 projection 文件，仅在 approval / user-input 请求出现、请求被处理、turn 进入终态或 Bridge generation 变化时输出一行 NDJSON，安静时不输出；支持 `--thread` 过滤与 `--until-terminal`。它只是唤醒提示，不新增监听端口，不改变 18 个 MCP 工具或 `codex_observe` 的行为，也不做任何审批决定。
+- 新增 stdio ↔ Unix socket 中继 `dist/src/socket-relay-cli.js`（macOS / Linux）：让只支持 stdio 的 MCP 客户端连到唯一的 socket 激活 Bridge，而不是每个客户端各起一个私有 Bridge 与 app-server；中继不解析协议、不持有状态，stdout 只承载 socket 字节，诊断写 stderr。socket 路径依次取 `LCB_SOCKET_PATH`、`$XDG_RUNTIME_DIR/worker-neutral-supervisor/codex.sock`、Linux `/run/user/<uid>/…`。
+- 新增连线检查 `dist/src/wiring-check-cli.js --entry <launcher>`（Linux / systemd）：只发送 MCP `initialize`，核对 MCP 入口是否 exec 了中继、没有派生子进程、projection 属于正在服务的 Bridge 进程、中继 socket 与 socket unit 监听路径一致，用于防止监督者实际调用的 Bridge 没有 projection sink。
 - 将包元数据、Bridge 上游 `clientInfo`、MCP `serverInfo`、macOS launcher 与公开文档统一为 `2.2.0`。
 
 ## V2.1.4（2026-09-30）
