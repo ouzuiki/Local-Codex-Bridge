@@ -1,9 +1,10 @@
 import { connect, type Socket } from "node:net";
-import { isAbsolute, join } from "node:path";
+import { posix } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 /**
  * Byte-for-byte stdio <-> Unix socket relay for strict MCP stdio clients.
+ * Socket paths are always POSIX paths, independent of the host running tests.
  *
  * It lets a stdio-only client (for example a desktop MCP entry) reach the one
  * long-lived socket-activated Bridge instead of spawning a private Bridge and
@@ -23,16 +24,16 @@ export function defaultSocketPath(
   }
   const configured = environment[SOCKET_PATH_ENV]?.trim();
   if (configured) {
-    if (!isAbsolute(configured)) throw new Error(`${SOCKET_PATH_ENV} must be an absolute path`);
+    if (!posix.isAbsolute(configured)) throw new Error(`${SOCKET_PATH_ENV} must be an absolute path`);
     return configured;
   }
   // /run/user/<uid> is the Linux systemd runtime directory; macOS has no equivalent.
   const runtimeDirectory =
     environment.XDG_RUNTIME_DIR?.trim() || (platform === "linux" && uid !== null ? `/run/user/${uid}` : "");
-  if (!runtimeDirectory || !isAbsolute(runtimeDirectory)) {
+  if (!runtimeDirectory || !posix.isAbsolute(runtimeDirectory)) {
     throw new Error(`cannot resolve the Bridge socket; set ${SOCKET_PATH_ENV} or XDG_RUNTIME_DIR`);
   }
-  return join(runtimeDirectory, "worker-neutral-supervisor", "codex.sock");
+  return posix.join(runtimeDirectory, "worker-neutral-supervisor", "codex.sock");
 }
 
 export interface RelayStreams {
