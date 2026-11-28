@@ -27,8 +27,14 @@ function generated(experimental: boolean): { clients: Record<string, Pick<Entry,
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
-test("installed 0.156 schema methods and parameter fields match the audited classification", () => {
+test("installed 0.156 schema methods and parameter fields match the audited classification", (t) => {
   const version = spawnSync(process.env.CODEX_EXE || "codex", ["--version"], { encoding: "utf8" });
+  // The audit needs the official executable. Without one (e.g. CI runners) it
+  // is skipped; with one, a version or schema mismatch still fails.
+  if ((version.error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
+    t.skip("official Codex executable not found (set CODEX_EXE or PATH); protocol schema audit not run");
+    return;
+  }
   assert.match(version.stdout, /0\.156\.0/);
   const stableGenerated = generated(false);
   const experimentalGenerated = generated(true);

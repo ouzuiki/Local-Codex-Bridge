@@ -9,6 +9,7 @@ import { MAX_STREAMED_AGENT_TEXT_CHARS, RuntimeStore } from "../src/runtime.js";
 import { ControlSurface, TOOL_DEFINITIONS } from "../src/tools.js";
 import {
   DARWIN_PLATFORM_POLICY,
+  platformPolicyFor,
   WINDOWS_PLATFORM_POLICY,
 } from "../src/platform.js";
 
@@ -729,7 +730,7 @@ test("completed fresh turn queues exactly one bounded project-scoped automatic w
   await mkdir(join(repo, ".git"), { recursive: true });
   t.after(() => rm(root, { recursive: true, force: true }));
   const writes: unknown[] = [];
-  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+  const surface = new ControlSurface(manager, undefined, platformPolicyFor(), {
     async atomicSearch() { return { items: [{ content: "RECALLED_SENTINEL_DO_NOT_WRITE_BACK" }] }; },
     async conversationAdd(input: unknown) { writes.push(input); return { acceptedIds: ["accepted"] }; },
   });
@@ -851,7 +852,7 @@ test("fresh codex_turn injects advisory recall with normalized nearest git-root 
   });
   const calls: unknown[] = [];
   const manager = turnManager();
-  const surface = new ControlSurface(manager, undefined, DARWIN_PLATFORM_POLICY, {
+  const surface = new ControlSurface(manager, undefined, platformPolicyFor(), {
     async atomicSearch(input) {
       calls.push(input);
       return { items: [{ id: "secret-id", content: "remember this", type: "fact", score: 0.75 }] };
